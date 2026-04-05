@@ -1,4 +1,6 @@
 import subprocess
+import sys
+
 
 def run_step(name, command):
     print("=" * 60)
@@ -12,9 +14,14 @@ def run_step(name, command):
 
 
 def main():
-    run_step("Fetch Google News", "python app/fetchers/google_news.py")
-    run_step("Process Articles", "python app/processors/process_articles.py")
-    run_step("Generate Company Summaries", "python app/summarizers/summarize_by_company.py")
+    python = sys.executable
+
+    run_step("Fetch Google News", f"{python} app/fetchers/google_news.py")
+    run_step("Process Articles", f"{python} app/processors/process_articles.py")
+    run_step(
+        "Generate Company Summaries",
+        f"{python} app/summarizers/summarize_by_company.py",
+    )
 
     print("All steps completed successfully.")
 
