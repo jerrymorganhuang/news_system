@@ -4,6 +4,7 @@ import math
 import sqlite3
 import subprocess
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
@@ -309,6 +310,19 @@ def format_time(dt_str):
     if not dt:
         return dt_str or ""
     return dt.strftime("%Y-%m-%d %H:%M")
+
+
+def format_digest_updated_time(dt_str):
+    dt = parse_dt(dt_str)
+    if not dt:
+        return ""
+
+    try:
+        dt_tpe = dt.replace(tzinfo=timezone.utc).astimezone(ZoneInfo("Asia/Taipei"))
+    except Exception:
+        return ""
+
+    return dt_tpe.strftime("%m/%d %H:%M TPE")
 
 
 def normalize_ticker(ticker: str) -> str:
@@ -932,7 +946,9 @@ try:
 
         summary_label = "AI Summary"
         if generated_at:
-            summary_label = f"AI Summary · Updated {format_time(generated_at)}"
+            updated_label = format_digest_updated_time(generated_at)
+            if updated_label:
+                summary_label = f"AI Summary · Updated: {updated_label}"
 
         st.markdown(
             f'<div class="summary-label">{summary_label}</div>',
