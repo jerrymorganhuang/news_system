@@ -1160,9 +1160,7 @@ try:
 
     if add_clicked:
         try:
-            current_page_mode = st.session_state.get("page_mode", "Dashboard")
             add_watchlist_ticker(conn, new_ticker)
-            st.session_state["page_mode"] = current_page_mode
             st.rerun()
         except Exception as e:
             st.sidebar.error(str(e))
@@ -1201,8 +1199,8 @@ try:
     if page_mode == "Ticker Admin":
         st.title("Ticker Admin")
 
-        admin_add_col1, admin_add_col2 = st.columns([4, 1.2], gap="small")
-        with admin_add_col1:
+        toolbar_col1, toolbar_col2, toolbar_col3, toolbar_col4 = st.columns([2.2, 0.8, 1.2, 1.3], gap="small")
+        with toolbar_col1:
             admin_new_ticker = st.text_input(
                 "Add ticker (Ticker Admin)",
                 value="",
@@ -1210,13 +1208,16 @@ try:
                 label_visibility="collapsed",
                 key="ticker_admin_add_ticker_input",
             )
-        with admin_add_col2:
+        with toolbar_col2:
             admin_add_clicked = st.button("Add", use_container_width=True, key="ticker_admin_add_btn")
+        with toolbar_col3:
+            save_clicked = st.button("Save Changes", type="primary", use_container_width=True, key="ticker_admin_save_btn")
+        with toolbar_col4:
+            delete_clicked = st.button("Delete Selected", use_container_width=True, key="ticker_admin_delete_selected_btn")
 
         if admin_add_clicked:
             try:
                 add_watchlist_ticker(conn, admin_new_ticker)
-                st.session_state["page_mode"] = "Ticker Admin"
                 st.rerun()
             except Exception as e:
                 st.error(str(e))
@@ -1244,22 +1245,20 @@ try:
                 key="ticker_admin_data_editor",
             )
 
-            save_col, delete_col = st.columns([1, 1], gap="small")
-            with save_col:
-                if st.button("Save Ticker Admin", type="primary"):
-                    save_df = edited_df[["ticker", "google_query", "sec_cik", "sec_company_name", "updated_at"]].copy()
-                    save_source_map_rows(conn, save_df)
-                    st.success("Source mapping saved.")
+            if save_clicked:
+                save_df = edited_df[["ticker", "google_query", "sec_cik", "sec_company_name", "updated_at"]].copy()
+                save_source_map_rows(conn, save_df)
+                st.success("Source mapping saved.")
+                st.rerun()
+
+            if delete_clicked:
+                selected_tickers = edited_df.loc[edited_df["delete"] == True, "ticker"].tolist()
+                if not selected_tickers:
+                    st.warning("No tickers selected for deletion.")
+                else:
+                    deleted_count = delete_watchlist_tickers(conn, selected_tickers)
+                    st.success(f"Deleted {deleted_count} ticker(s) from watchlist and ticker mappings.")
                     st.rerun()
-            with delete_col:
-                if st.button("Delete selected", key="ticker_admin_delete_selected_btn"):
-                    selected_tickers = edited_df.loc[edited_df["delete"] == True, "ticker"].tolist()
-                    if not selected_tickers:
-                        st.warning("No tickers selected for deletion.")
-                    else:
-                        deleted_count = delete_watchlist_tickers(conn, selected_tickers)
-                        st.success(f"Deleted {deleted_count} ticker(s) from watchlist and ticker mappings.")
-                        st.rerun()
     else:
         st.title(f"{selected_window_hours}h Company News Dashboard")
 
