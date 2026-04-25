@@ -234,31 +234,8 @@ st.markdown(
         min-height: 30px !important;
     }
 
-    section[data-testid="stSidebar"] .stRadio > div {
-        gap: 0.2rem !important;
-    }
-
-    section[data-testid="stSidebar"] .stRadio > div[role="radiogroup"] {
-        flex-direction: row !important;
-        gap: 0.3rem !important;
-    }
-
-    section[data-testid="stSidebar"] .stRadio label[data-baseweb="radio"] {
-        margin-bottom: 0 !important;
-        min-height: 26px !important;
-        padding: 0.02rem 0.45rem !important;
-        border-radius: 999px !important;
-        border: 1px solid rgba(120, 120, 120, 0.45) !important;
-    }
-
-    section[data-testid="stSidebar"] .stRadio label[data-baseweb="radio"] > div:first-child {
-        display: none !important;
-    }
-
-    section[data-testid="stSidebar"] .stRadio label[data-baseweb="radio"] p {
-        font-size: 11px !important;
-        line-height: 1 !important;
-        margin: 0 !important;
+    section[data-testid="stSidebar"] .stSelectbox {
+        margin-bottom: 0.1rem !important;
     }
 
     section[data-testid="stSidebar"] .stCheckbox {
@@ -949,30 +926,27 @@ try:
     watchlist_tickers = sorted([row["ticker"] for row in watchlist_rows])
 
     # ----- Sidebar -----
-    st.sidebar.caption("Display")
-    window_label = st.sidebar.radio(
-        "News Window",
-        options=["24h", "48h"],
-        index=0,
-        horizontal=True,
-        label_visibility="collapsed",
-    )
-    selected_window_hours = int(window_label.replace("h", ""))
-
     hide_empty = st.sidebar.checkbox(
         "Hide tickers with no data",
         value=False
     )
 
+    window_label = st.sidebar.selectbox(
+        "News Window",
+        options=["24h", "48h"],
+        index=0,
+        label_visibility="collapsed",
+    )
+    selected_window_hours = int(window_label.replace("h", ""))
+
     sort_option = st.sidebar.selectbox(
-        "Sort by",
-        ["Ticker A-Z", "News count (high to low)"],
-        index=0
+        "Sort",
+        ["Sort by Ticker A-Z", "Sort by News count (high to low)"],
+        index=0,
+        label_visibility="collapsed",
     )
 
     st.sidebar.divider()
-
-    st.sidebar.caption("Actions")
 
     action_col1, action_col2, action_col3 = st.sidebar.columns(3, gap="small")
 
@@ -1099,7 +1073,7 @@ try:
     if hide_empty:
         dashboard_rows = [row for row in dashboard_rows if row["has_data"]]
 
-    if sort_option == "Ticker A-Z":
+    if sort_option == "Sort by Ticker A-Z":
         dashboard_rows = sorted(dashboard_rows, key=lambda x: x["ticker"])
     else:
         dashboard_rows = sorted(
