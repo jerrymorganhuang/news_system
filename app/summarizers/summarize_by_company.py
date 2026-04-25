@@ -35,6 +35,12 @@ def get_db_connection() -> sqlite3.Connection:
     return conn
 
 
+def clear_company_digest(conn: sqlite3.Connection) -> None:
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM company_digest")
+    conn.commit()
+
+
 def get_recent_tickers(conn: sqlite3.Connection) -> List[str]:
     cursor = conn.cursor()
     cursor.execute("""
@@ -169,29 +175,34 @@ def main():
 
     try:
         client = get_openai_client()
+        print("Clearing company_digest cache table...")
+        clear_company_digest(conn)
+
         tickers = get_recent_tickers(conn)
 
         if not tickers:
-            print("No recent tickers found.")
+            print("No recent tickers found in the last 48 hours.")
             return
 
         for ticker in tickers:
             print(f"Summarizing {ticker}...")
 
             articles = get_articles_for_ticker(conn, ticker)
+            article_count = len(articles)
 
-            if not articles:
+            if article_count == 0:
                 print("  No articles found.\n")
                 continue
 
             try:
+                print(f"  Calling OpenAI | ticker={ticker} | article_count={article_count}")
                 summary = generate_ai_summary(client, ticker, articles)
 
                 save_company_digest(
                     conn=conn,
                     ticker=ticker,
                     summary=summary,
-                    article_count=len(articles)
+                    article_count=article_count
                 )
 
                 print("  Summary saved.\n")
