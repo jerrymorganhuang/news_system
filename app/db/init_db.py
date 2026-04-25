@@ -58,6 +58,40 @@ def init_db():
     )
     """)
 
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS ticker_source_map (
+        ticker TEXT PRIMARY KEY,
+        google_query TEXT,
+        sec_cik TEXT,
+        sec_company_name TEXT,
+        updated_at TEXT
+    )
+    """)
+
+    cursor.execute(
+        """
+        INSERT INTO ticker_source_map (
+            ticker,
+            google_query,
+            sec_cik,
+            sec_company_name,
+            updated_at
+        )
+        SELECT
+            w.ticker,
+            COALESCE(NULLIF(w.google_query, ''), w.ticker) AS google_query,
+            NULLIF(w.sec_cik, '') AS sec_cik,
+            NULL AS sec_company_name,
+            CURRENT_TIMESTAMP
+        FROM watchlist w
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM ticker_source_map tsm
+            WHERE tsm.ticker = w.ticker
+        )
+        """
+    )
+
     conn.commit()
     conn.close()
 

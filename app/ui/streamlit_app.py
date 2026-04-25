@@ -477,6 +477,113 @@ def remove_watchlist_ticker(conn, ticker):
     conn.commit()
 
 
+def ensure_ticker_source_map_schema(conn):
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ticker_source_map (
+            ticker TEXT PRIMARY KEY,
+            google_query TEXT,
+            sec_cik TEXT,
+            sec_company_name TEXT,
+            updated_at TEXT
+        )
+        """
+    )
+
+    cursor.execute(
+        """
+        INSERT INTO ticker_source_map (
+            ticker,
+            google_query,
+            sec_cik,
+            sec_company_name,
+            updated_at
+        )
+        SELECT
+            w.ticker,
+            COALESCE(NULLIF(w.google_query, ''), w.ticker) AS google_query,
+            NULLIF(w.sec_cik, '') AS sec_cik,
+            NULL AS sec_company_name,
+            CURRENT_TIMESTAMP
+        FROM watchlist w
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM ticker_source_map tsm
+            WHERE tsm.ticker = w.ticker
+        )
+        """
+    )
+    conn.commit()
+
+
+def get_source_map_rows(conn):
+    query = """
+        SELECT
+            w.ticker,
+            COALESCE(NULLIF(tsm.google_query, ''), w.ticker) AS google_query,
+            COALESCE(tsm.sec_cik, '') AS sec_cik,
+            COALESCE(tsm.sec_company_name, '') AS sec_company_name
+        FROM watchlist w
+        LEFT JOIN ticker_source_map tsm
+          ON tsm.ticker = w.ticker
+        ORDER BY w.ticker
+    """
+    rows = conn.execute(query).fetchall()
+    return pd.DataFrame(
+        [
+            {
+                "ticker": safe_text(row[0]),
+                "google_query": safe_text(row[1]),
+                "sec_cik": safe_text(row[2]),
+                "sec_company_name": safe_text(row[3]),
+            }
+            for row in rows
+        ]
+    )
+
+
+def save_source_map_rows(conn, source_map_df):
+    cursor = conn.cursor()
+    now_str = utc_now().strftime("%Y-%m-%d %H:%M:%S")
+
+    for _, row in source_map_df.iterrows():
+        ticker = normalize_ticker(row.get("ticker", ""))
+        if not ticker:
+            continue
+
+        google_query = (row.get("google_query", "") or "").strip() or ticker
+        sec_cik = (row.get("sec_cik", "") or "").strip()
+        sec_company_name = (row.get("sec_company_name", "") or "").strip()
+
+        cursor.execute(
+            """
+            INSERT INTO ticker_source_map (
+                ticker,
+                google_query,
+                sec_cik,
+                sec_company_name,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(ticker) DO UPDATE SET
+                google_query = excluded.google_query,
+                sec_cik = excluded.sec_cik,
+                sec_company_name = excluded.sec_company_name,
+                updated_at = excluded.updated_at
+            """,
+            (
+                ticker,
+                google_query,
+                sec_cik if sec_cik else None,
+                sec_company_name if sec_company_name else None,
+                now_str,
+            )
+        )
+
+    conn.commit()
+
+
 # ========= Digest / Articles =========
 def ensure_company_digest_schema(conn):
     cursor = conn.cursor()
@@ -886,6 +993,9 @@ if "pipeline_status" not in st.session_state:
 if "watchlist_manage_mode" not in st.session_state:
     st.session_state["watchlist_manage_mode"] = False
 
+if "page_mode" not in st.session_state:
+    st.session_state["page_mode"] = "Dashboard"
+
 
 # ========= Delete Dialog =========
 @st.dialog("Confirm delete")
@@ -921,11 +1031,20 @@ conn = get_connection()
 
 try:
     ensure_company_digest_schema(conn)
+    ensure_ticker_source_map_schema(conn)
 
     watchlist_rows = get_watchlist_rows(conn)
     watchlist_tickers = sorted([row["ticker"] for row in watchlist_rows])
 
     # ----- Sidebar -----
+    page_mode = st.sidebar.radio(
+        "Page",
+        options=["Dashboard", "Source Mapping"],
+        key="page_mode",
+    )
+
+    st.sidebar.divider()
+
     hide_empty = st.sidebar.checkbox(
         "Hide tickers with no data",
         value=False
@@ -1059,101 +1178,130 @@ try:
     if st.session_state["pending_delete_ticker"]:
         confirm_delete_dialog(st.session_state["pending_delete_ticker"])
 
-    st.title(f"{selected_window_hours}h Company News Dashboard")
+    if page_mode == "Source Mapping":
+        st.title("Source Mapping")
+        st.caption(
+            "Manage per-source identifiers for watchlist tickers. "
+            "This page only stores mappings; fetch behavior is unchanged."
+        )
 
-    if watchlist_tickers:
-        with st.spinner(f"Ensuring {selected_window_hours}h digests..."):
-            run_python_script(
-                SUMMARIZE_SCRIPT_PATH, args=["--window-hours", str(selected_window_hours)]
+        source_map_df = get_source_map_rows(conn)
+        if source_map_df.empty:
+            st.info("No watchlist tickers available.")
+        else:
+            edited_df = st.data_editor(
+                source_map_df,
+                use_container_width=True,
+                hide_index=True,
+                disabled=["ticker"],
+                column_config={
+                    "ticker": st.column_config.TextColumn("ticker"),
+                    "google_query": st.column_config.TextColumn("google_query"),
+                    "sec_cik": st.column_config.TextColumn("sec_cik"),
+                    "sec_company_name": st.column_config.TextColumn("sec_company_name"),
+                },
             )
 
-    # ----- Main -----
-    dashboard_rows = build_dashboard_rows(conn, selected_window_hours)
-
-    if hide_empty:
-        dashboard_rows = [row for row in dashboard_rows if row["has_data"]]
-
-    if sort_option == "Sort by Ticker A-Z":
-        dashboard_rows = sorted(dashboard_rows, key=lambda x: x["ticker"])
+            if st.button("Save Source Mapping", type="primary"):
+                save_source_map_rows(conn, edited_df)
+                st.success("Source mapping saved.")
+                st.rerun()
     else:
-        dashboard_rows = sorted(
-            dashboard_rows,
-            key=lambda x: (-x["article_count"], x["ticker"])
+        st.title(f"{selected_window_hours}h Company News Dashboard")
+
+        if watchlist_tickers:
+            with st.spinner(f"Ensuring {selected_window_hours}h digests..."):
+                run_python_script(
+                    SUMMARIZE_SCRIPT_PATH, args=["--window-hours", str(selected_window_hours)]
+                )
+
+        # ----- Main -----
+        dashboard_rows = build_dashboard_rows(conn, selected_window_hours)
+
+        if hide_empty:
+            dashboard_rows = [row for row in dashboard_rows if row["has_data"]]
+
+        if sort_option == "Sort by Ticker A-Z":
+            dashboard_rows = sorted(dashboard_rows, key=lambda x: x["ticker"])
+        else:
+            dashboard_rows = sorted(
+                dashboard_rows,
+                key=lambda x: (-x["article_count"], x["ticker"])
+            )
+
+        if not dashboard_rows:
+            st.info("No rows to display.")
+            st.stop()
+
+        overview_col1, overview_col2, overview_col3 = st.columns(3)
+        overview_col1.metric("Displayed tickers", len(dashboard_rows))
+        overview_col2.metric("Tickers with data", sum(1 for row in dashboard_rows if row["has_data"]))
+        overview_col3.metric(
+            f"Articles ({selected_window_hours}h)",
+            sum(row["article_count"] for row in dashboard_rows),
         )
 
-    if not dashboard_rows:
-        st.info("No rows to display.")
-        st.stop()
+        st.markdown("---")
 
-    overview_col1, overview_col2, overview_col3 = st.columns(3)
-    overview_col1.metric("Displayed tickers", len(dashboard_rows))
-    overview_col2.metric("Tickers with data", sum(1 for row in dashboard_rows if row["has_data"]))
-    overview_col3.metric(
-        f"Articles ({selected_window_hours}h)",
-        sum(row["article_count"] for row in dashboard_rows),
-    )
+        for row in dashboard_rows:
+            ticker = row["ticker"]
+            summary = row["summary"]
+            generated_at = row["generated_at"]
+            article_count = row["article_count"]
+            articles_df = row["articles_df"]
 
-    st.markdown("---")
+            price_html = format_price(row["price"])
+            day_html = format_pct_html(row["day_pct"])
+            after_html = format_pct_html(row["after_pct"])
+            week_html = format_pct_html(row["week_pct"])
+            ytd_html = format_pct_html(row["ytd_pct"])
 
-    for row in dashboard_rows:
-        ticker = row["ticker"]
-        summary = row["summary"]
-        generated_at = row["generated_at"]
-        article_count = row["article_count"]
-        articles_df = row["articles_df"]
+            header_html = build_company_header_html(
+                ticker=ticker,
+                price_html=price_html,
+                day_html=day_html,
+                after_html=after_html,
+                week_html=week_html,
+                ytd_html=ytd_html,
+                article_count=article_count,
+            )
+            st.markdown(header_html, unsafe_allow_html=True)
 
-        price_html = format_price(row["price"])
-        day_html = format_pct_html(row["day_pct"])
-        after_html = format_pct_html(row["after_pct"])
-        week_html = format_pct_html(row["week_pct"])
-        ytd_html = format_pct_html(row["ytd_pct"])
+            summary_label = f"AI Summary · {selected_window_hours}h"
+            if generated_at:
+                updated_label = format_digest_updated_time(generated_at)
+                if updated_label:
+                    summary_label = f"AI Summary · {selected_window_hours}h · Updated: {updated_label}"
 
-        header_html = build_company_header_html(
-            ticker=ticker,
-            price_html=price_html,
-            day_html=day_html,
-            after_html=after_html,
-            week_html=week_html,
-            ytd_html=ytd_html,
-            article_count=article_count,
-        )
-        st.markdown(header_html, unsafe_allow_html=True)
-
-        summary_label = f"AI Summary · {selected_window_hours}h"
-        if generated_at:
-            updated_label = format_digest_updated_time(generated_at)
-            if updated_label:
-                summary_label = f"AI Summary · {selected_window_hours}h · Updated: {updated_label}"
-
-        st.markdown(
-            f'<div class="summary-label">{summary_label}</div>',
-            unsafe_allow_html=True
-        )
-
-        if summary:
             st.markdown(
-                f'<div class="summary-text">{summary}</div>',
+                f'<div class="summary-label">{summary_label}</div>',
                 unsafe_allow_html=True
             )
-        else:
-            st.write("")
 
-        with st.expander(f"Articles ({article_count})", expanded=False):
-            if articles_df.empty:
-                st.write("")
-            else:
-                display_df = articles_df.copy()
-                display_df["link"] = display_df["url"].apply(
-                    lambda x: f'<a href="{x}" target="_blank">Open</a>' if x else ""
-                )
-                display_df = display_df[["published_at", "source", "title", "link"]]
-
+            if summary:
                 st.markdown(
-                    display_df.to_html(escape=False, index=False),
+                    f'<div class="summary-text">{summary}</div>',
                     unsafe_allow_html=True
                 )
+            else:
+                st.write("")
 
-        st.markdown('<hr class="company-divider">', unsafe_allow_html=True)
+            with st.expander(f"Articles ({article_count})", expanded=False):
+                if articles_df.empty:
+                    st.write("")
+                else:
+                    display_df = articles_df.copy()
+                    display_df["link"] = display_df["url"].apply(
+                        lambda x: f'<a href="{x}" target="_blank">Open</a>' if x else ""
+                    )
+                    display_df = display_df[["published_at", "source", "title", "link"]]
+
+                    st.markdown(
+                        display_df.to_html(escape=False, index=False),
+                        unsafe_allow_html=True
+                    )
+
+            st.markdown('<hr class="company-divider">', unsafe_allow_html=True)
 
 finally:
     conn.close()

@@ -6,6 +6,7 @@ REQUIRED_TABLES = {
     "watchlist",
     "articles",
     "company_digest",
+    "ticker_source_map",
 }
 
 REQUIRED_ARTICLES_COLUMNS = {
@@ -22,6 +23,14 @@ REQUIRED_COMPANY_DIGEST_COLUMNS = {
     "article_count",
     "summary",
     "generated_at",
+}
+
+REQUIRED_TICKER_SOURCE_MAP_COLUMNS = {
+    "ticker",
+    "google_query",
+    "sec_cik",
+    "sec_company_name",
+    "updated_at",
 }
 
 
@@ -62,6 +71,13 @@ def main() -> None:
             missing_columns = sorted(REQUIRED_COMPANY_DIGEST_COLUMNS - digest_columns)
             for column in missing_columns:
                 missing_items.append(f"missing company_digest column: {column}")
+
+        if "ticker_source_map" in tables:
+            cursor.execute("PRAGMA table_info(ticker_source_map)")
+            source_map_columns = {row[1] for row in cursor.fetchall()}
+            missing_columns = sorted(REQUIRED_TICKER_SOURCE_MAP_COLUMNS - source_map_columns)
+            for column in missing_columns:
+                missing_items.append(f"missing ticker_source_map column: {column}")
 
         if missing_items:
             print("Schema check failed.")
