@@ -518,17 +518,27 @@ def ensure_ticker_source_map_schema(conn):
 
 
 def get_source_map_rows(conn):
+    table_columns = set()
+    try:
+        pragma_rows = conn.execute("PRAGMA table_info(ticker_source_map)").fetchall()
+        table_columns = {row[1] for row in pragma_rows}
+    except sqlite3.Error:
+        table_columns = set()
+
+    updated_at_select = "tsm.updated_at" if "updated_at" in table_columns else "NULL"
+
     query = """
         SELECT
             w.ticker,
             COALESCE(NULLIF(tsm.google_query, ''), w.ticker) AS google_query,
             COALESCE(tsm.sec_cik, '') AS sec_cik,
-            COALESCE(tsm.sec_company_name, '') AS sec_company_name
+            COALESCE(tsm.sec_company_name, '') AS sec_company_name,
+            {updated_at_select} AS updated_at
         FROM watchlist w
         LEFT JOIN ticker_source_map tsm
           ON tsm.ticker = w.ticker
         ORDER BY w.ticker
-    """
+    """.format(updated_at_select=updated_at_select)
     rows = conn.execute(query).fetchall()
     return pd.DataFrame(
         [
@@ -537,6 +547,7 @@ def get_source_map_rows(conn):
                 "google_query": safe_text(row[1]),
                 "sec_cik": safe_text(row[2]),
                 "sec_company_name": safe_text(row[3]),
+                "updated_at": safe_text(row[4]),
             }
             for row in rows
         ]
@@ -1037,14 +1048,6 @@ try:
     watchlist_tickers = sorted([row["ticker"] for row in watchlist_rows])
 
     # ----- Sidebar -----
-    page_mode = st.sidebar.radio(
-        "Page",
-        options=["Dashboard", "Source Mapping"],
-        key="page_mode",
-    )
-
-    st.sidebar.divider()
-
     hide_empty = st.sidebar.checkbox(
         "Hide tickers with no data",
         value=False
@@ -1166,6 +1169,14 @@ try:
             unsafe_allow_html=True
         )
 
+    st.sidebar.divider()
+
+    page_mode = st.sidebar.selectbox(
+        "Page",
+        options=["Dashboard", "Source Mapping"],
+        key="page_mode",
+    )
+
     if st.session_state["pipeline_log"]:
         with st.sidebar.expander("Last run log", expanded=False):
             st.text_area(
@@ -1193,12 +1204,13 @@ try:
                 source_map_df,
                 use_container_width=True,
                 hide_index=True,
-                disabled=["ticker"],
+                disabled=["ticker", "updated_at"],
                 column_config={
                     "ticker": st.column_config.TextColumn("ticker"),
                     "google_query": st.column_config.TextColumn("google_query"),
                     "sec_cik": st.column_config.TextColumn("sec_cik"),
                     "sec_company_name": st.column_config.TextColumn("sec_company_name"),
+                    "updated_at": st.column_config.TextColumn("updated_at"),
                 },
             )
 
