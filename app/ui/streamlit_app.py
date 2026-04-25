@@ -234,6 +234,33 @@ st.markdown(
         min-height: 30px !important;
     }
 
+    section[data-testid="stSidebar"] .stRadio > div {
+        gap: 0.2rem !important;
+    }
+
+    section[data-testid="stSidebar"] .stRadio > div[role="radiogroup"] {
+        flex-direction: row !important;
+        gap: 0.3rem !important;
+    }
+
+    section[data-testid="stSidebar"] .stRadio label[data-baseweb="radio"] {
+        margin-bottom: 0 !important;
+        min-height: 26px !important;
+        padding: 0.02rem 0.45rem !important;
+        border-radius: 999px !important;
+        border: 1px solid rgba(120, 120, 120, 0.45) !important;
+    }
+
+    section[data-testid="stSidebar"] .stRadio label[data-baseweb="radio"] > div:first-child {
+        display: none !important;
+    }
+
+    section[data-testid="stSidebar"] .stRadio label[data-baseweb="radio"] p {
+        font-size: 11px !important;
+        line-height: 1 !important;
+        margin: 0 !important;
+    }
+
     section[data-testid="stSidebar"] .stCheckbox {
         margin-top: -0.1rem !important;
         margin-bottom: -0.15rem !important;
@@ -923,10 +950,12 @@ try:
 
     # ----- Sidebar -----
     st.sidebar.caption("Display")
-    window_label = st.sidebar.selectbox(
+    window_label = st.sidebar.radio(
         "News Window",
         options=["24h", "48h"],
         index=0,
+        horizontal=True,
+        label_visibility="collapsed",
     )
     selected_window_hours = int(window_label.replace("h", ""))
 
@@ -1057,9 +1086,6 @@ try:
         confirm_delete_dialog(st.session_state["pending_delete_ticker"])
 
     st.title(f"{selected_window_hours}h Company News Dashboard")
-    st.caption(
-        f"Rolling {selected_window_hours}-hour company news dashboard with AI-generated company digests"
-    )
 
     if watchlist_tickers:
         with st.spinner(f"Ensuring {selected_window_hours}h digests..."):
