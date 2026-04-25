@@ -1,8 +1,8 @@
 import os
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -35,35 +35,118 @@ def get_db_connection() -> sqlite3.Connection:
     return conn
 
 
-def clear_company_digest(conn: sqlite3.Connection) -> None:
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM company_digest")
-    conn.commit()
-
-
 def get_recent_tickers(conn: sqlite3.Connection) -> List[str]:
     cursor = conn.cursor()
-    cursor.execute("""
+    cursor.execute(
+        """
         SELECT DISTINCT ticker
         FROM articles
-        WHERE published_at >= datetime('now', '-48 hours')
+        WHERE datetime(COALESCE(published_at, fetched_at)) >= datetime('now', '-48 hours')
         ORDER BY ticker
-    """)
+        """
+    )
     rows = cursor.fetchall()
     return [row[0] for row in rows]
 
 
+def get_all_digest_tickers(conn: sqlite3.Connection) -> List[str]:
+    cursor = conn.cursor()
+    cursor.execute("SELECT ticker FROM company_digest")
+    return [row[0] for row in cursor.fetchall()]
+
+
+def delete_digest_for_ticker(conn: sqlite3.Connection, ticker: str) -> None:
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM company_digest WHERE ticker = ?", (ticker,))
+    conn.commit()
+
+
 def get_articles_for_ticker(conn: sqlite3.Connection, ticker: str) -> List[Tuple]:
     cursor = conn.cursor()
-    cursor.execute("""
+    cursor.execute(
+        """
         SELECT title, source, published_at, content, url
         FROM articles
         WHERE ticker = ?
-          AND published_at >= datetime('now', '-48 hours')
-        ORDER BY published_at DESC
+          AND datetime(COALESCE(published_at, fetched_at)) >= datetime('now', '-48 hours')
+        ORDER BY datetime(COALESCE(published_at, fetched_at)) DESC
         LIMIT ?
-    """, (ticker, MAX_ARTICLES_PER_TICKER))
+    """,
+        (ticker, MAX_ARTICLES_PER_TICKER),
+    )
     return cursor.fetchall()
+
+
+def get_digest_generated_at(conn: sqlite3.Connection, ticker: str) -> Optional[str]:
+    cursor = conn.cursor()
+    row = cursor.execute(
+        """
+        SELECT datetime(generated_at)
+        FROM company_digest
+        WHERE ticker = ?
+        LIMIT 1
+        """,
+        (ticker,),
+    ).fetchone()
+    if not row:
+        return None
+    return row[0]
+
+
+def parse_db_timestamp(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+
+    normalized = value.strip()
+    if not normalized:
+        return None
+
+    # Handle common SQLite and ISO formats consistently.
+    normalized = normalized.replace("T", " ").replace("Z", "+00:00")
+
+    try:
+        dt = datetime.fromisoformat(normalized)
+    except ValueError:
+        try:
+            dt = datetime.strptime(normalized, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return None
+
+    # Normalize timezone-aware values for safe comparison.
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+
+    return dt
+
+
+def get_latest_article_timestamp(conn: sqlite3.Connection, ticker: str) -> Optional[str]:
+    cursor = conn.cursor()
+    row = cursor.execute(
+        """
+        SELECT MAX(datetime(COALESCE(published_at, fetched_at)))
+        FROM articles
+        WHERE ticker = ?
+          AND datetime(COALESCE(published_at, fetched_at)) >= datetime('now', '-48 hours')
+        """,
+        (ticker,),
+    ).fetchone()
+    if not row:
+        return None
+    return row[0]
+
+
+def should_regenerate_digest(
+    generated_at: Optional[str], latest_article_timestamp: Optional[str]
+) -> bool:
+    generated_dt = parse_db_timestamp(generated_at)
+    latest_article_dt = parse_db_timestamp(latest_article_timestamp)
+
+    if generated_dt is None:
+        return True
+    if latest_article_dt is None:
+        return False
+
+    return latest_article_dt > generated_dt
 
 
 def build_articles_text(ticker: str, articles: List[Tuple]) -> str:
@@ -123,10 +206,7 @@ def generate_ai_summary(client: OpenAI, ticker: str, articles: List[Tuple]) -> s
 {article_text}
 """.strip()
 
-    response = client.responses.create(
-        model=MODEL,
-        input=prompt
-    )
+    response = client.responses.create(model=MODEL, input=prompt)
 
     summary = (response.output_text or "").strip()
 
@@ -140,14 +220,15 @@ def save_company_digest(
     conn: sqlite3.Connection,
     ticker: str,
     summary: str,
-    article_count: int
+    article_count: int,
 ) -> None:
     cursor = conn.cursor()
 
     window_end = datetime.utcnow()
     window_start = window_end - timedelta(hours=48)
 
-    cursor.execute("""
+    cursor.execute(
+        """
         INSERT OR REPLACE INTO company_digest (
             ticker,
             window_start,
@@ -156,18 +237,20 @@ def save_company_digest(
             summary,
             generated_at
         ) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-    """, (
-        ticker,
-        window_start.strftime("%Y-%m-%d %H:%M:%S"),
-        window_end.strftime("%Y-%m-%d %H:%M:%S"),
-        article_count,
-        summary
-    ))
+    """,
+        (
+            ticker,
+            window_start.strftime("%Y-%m-%d %H:%M:%S"),
+            window_end.strftime("%Y-%m-%d %H:%M:%S"),
+            article_count,
+            summary,
+        ),
+    )
 
     conn.commit()
 
 
-def main():
+def main() -> None:
     print(f"Loading .env from: {ENV_PATH}")
     print(f"Using database: {DB_PATH}")
 
@@ -175,40 +258,48 @@ def main():
 
     try:
         client = get_openai_client()
-        print("Clearing company_digest cache table...")
-        clear_company_digest(conn)
 
-        tickers = get_recent_tickers(conn)
+        recent_tickers = get_recent_tickers(conn)
+        recent_set = set(recent_tickers)
 
-        if not tickers:
+        digest_tickers = get_all_digest_tickers(conn)
+        stale_digest_tickers = sorted(set(digest_tickers) - recent_set)
+
+        for ticker in stale_digest_tickers:
+            delete_digest_for_ticker(conn, ticker)
+            print(f"ticker={ticker} | article_count=0 | action=delete stale digest")
+
+        if not recent_tickers:
             print("No recent tickers found in the last 48 hours.")
             return
 
-        for ticker in tickers:
-            print(f"Summarizing {ticker}...")
-
+        for ticker in recent_tickers:
             articles = get_articles_for_ticker(conn, ticker)
             article_count = len(articles)
 
             if article_count == 0:
-                print("  No articles found.\n")
+                # Defensive branch; recent_tickers already filters this out.
+                delete_digest_for_ticker(conn, ticker)
+                print(f"ticker={ticker} | article_count=0 | action=delete stale digest")
                 continue
 
-            try:
-                print(f"  Calling OpenAI | ticker={ticker} | article_count={article_count}")
-                summary = generate_ai_summary(client, ticker, articles)
+            generated_at = get_digest_generated_at(conn, ticker)
+            latest_article_timestamp = get_latest_article_timestamp(conn, ticker)
 
-                save_company_digest(
-                    conn=conn,
-                    ticker=ticker,
-                    summary=summary,
-                    article_count=article_count
-                )
-
-                print("  Summary saved.\n")
-
-            except Exception as e:
-                print(f"  Failed to summarize {ticker}: {e}\n")
+            if should_regenerate_digest(generated_at, latest_article_timestamp):
+                try:
+                    print(f"ticker={ticker} | article_count={article_count} | action=generate")
+                    summary = generate_ai_summary(client, ticker, articles)
+                    save_company_digest(
+                        conn=conn,
+                        ticker=ticker,
+                        summary=summary,
+                        article_count=article_count,
+                    )
+                except Exception as e:
+                    print(f"  Failed to summarize {ticker}: {e}")
+            else:
+                print(f"ticker={ticker} | article_count={article_count} | action=skip")
 
         print("Done.")
 
