@@ -930,18 +930,20 @@ try:
         )
         st.markdown(header_html, unsafe_allow_html=True)
 
-        st.markdown('<div class="summary-label">AI Summary</div>', unsafe_allow_html=True)
+        summary_label = "AI Summary"
+        if generated_at:
+            summary_label = f"AI Summary · Updated {format_time(generated_at)}"
+
+        st.markdown(
+            f'<div class="summary-label">{summary_label}</div>',
+            unsafe_allow_html=True
+        )
 
         if summary:
             st.markdown(
                 f'<div class="summary-text">{summary}</div>',
                 unsafe_allow_html=True
             )
-            if generated_at:
-                st.markdown(
-                    f'<div class="generated-time">Generated at: {format_time(generated_at)} UTC</div>',
-                    unsafe_allow_html=True
-                )
         else:
             st.write("")
 
