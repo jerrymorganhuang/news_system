@@ -549,6 +549,8 @@ def get_market_snapshot(ticker):
         regular_market = None
         post_market = None
         pre_market = None
+        post_market_pct = None
+        pre_market_pct = None
 
         try:
             regular_market = info.get("regular_market_price", None)
@@ -565,11 +567,29 @@ def get_market_snapshot(ticker):
         except Exception:
             pre_market = None
 
+        if post_market in (None, 0) and pre_market in (None, 0):
+            info_ext = {}
+            try:
+                info_ext = tk.info or {}
+            except Exception:
+                info_ext = {}
+
+            post_market = info_ext.get("postMarketPrice", None)
+            post_market_pct = info_ext.get("postMarketChangePercent", None)
+            pre_market = info_ext.get("preMarketPrice", None)
+            pre_market_pct = info_ext.get("preMarketChangePercent", None)
+
         after_pct = None
-        if post_market not in (None, 0) and regular_market not in (None, 0):
-            after_pct = pct_change(post_market, regular_market)
-        elif pre_market not in (None, 0) and regular_market not in (None, 0):
-            after_pct = pct_change(pre_market, regular_market)
+        if post_market not in (None, 0):
+            if post_market_pct is not None:
+                after_pct = post_market_pct
+            elif regular_market not in (None, 0):
+                after_pct = pct_change(post_market, regular_market)
+        elif pre_market not in (None, 0):
+            if pre_market_pct is not None:
+                after_pct = pre_market_pct
+            elif regular_market not in (None, 0):
+                after_pct = pct_change(pre_market, regular_market)
 
         week_pct = pct_change(price, week_close)
 
