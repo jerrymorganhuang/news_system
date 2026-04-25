@@ -21,7 +21,7 @@ SUMMARIZE_SCRIPT_PATH = os.path.join(BASE_DIR, "app", "summarizers", "summarize_
 RESET_DB_PATH = os.path.join(BASE_DIR, "app", "db", "reset_news_data.py")
 
 LOOKBACK_HOURS = 48
-WATCHLIST_CHIPS_PER_ROW = 5
+WATCHLIST_CHIPS_PER_ROW = 4
 
 
 # ========= Page Config =========
