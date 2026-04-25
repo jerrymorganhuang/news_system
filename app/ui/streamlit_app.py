@@ -490,6 +490,19 @@ def add_watchlist_ticker(conn, ticker):
     conn.commit()
 
 
+def delete_watchlist_tickers(conn, tickers):
+    normalized_tickers = [normalize_ticker(ticker) for ticker in tickers]
+    normalized_tickers = [ticker for ticker in normalized_tickers if ticker]
+    if not normalized_tickers:
+        return 0
+
+    cursor = conn.cursor()
+    cursor.executemany("DELETE FROM watchlist WHERE ticker = ?", [(ticker,) for ticker in normalized_tickers])
+    cursor.executemany("DELETE FROM ticker_source_map WHERE ticker = ?", [(ticker,) for ticker in normalized_tickers])
+    conn.commit()
+    return len(normalized_tickers)
+
+
 def remove_watchlist_ticker(conn, ticker):
     ticker = normalize_ticker(ticker)
     cursor = conn.cursor()
@@ -1147,7 +1160,9 @@ try:
 
     if add_clicked:
         try:
+            current_page_mode = st.session_state.get("page_mode", "Dashboard")
             add_watchlist_ticker(conn, new_ticker)
+            st.session_state["page_mode"] = current_page_mode
             st.rerun()
         except Exception as e:
             st.sidebar.error(str(e))
@@ -1185,45 +1200,66 @@ try:
 
     if page_mode == "Ticker Admin":
         st.title("Ticker Admin")
-        st.caption(
-            "Manage per-source identifiers for watchlist tickers. "
-            "This page only stores mappings; fetch behavior is unchanged."
-        )
+
+        admin_add_col1, admin_add_col2 = st.columns([4, 1.2], gap="small")
+        with admin_add_col1:
+            admin_new_ticker = st.text_input(
+                "Add ticker (Ticker Admin)",
+                value="",
+                placeholder="NVDA",
+                label_visibility="collapsed",
+                key="ticker_admin_add_ticker_input",
+            )
+        with admin_add_col2:
+            admin_add_clicked = st.button("Add", use_container_width=True, key="ticker_admin_add_btn")
+
+        if admin_add_clicked:
+            try:
+                add_watchlist_ticker(conn, admin_new_ticker)
+                st.session_state["page_mode"] = "Ticker Admin"
+                st.rerun()
+            except Exception as e:
+                st.error(str(e))
 
         source_map_df = get_source_map_rows(conn)
         if source_map_df.empty:
             st.info("No watchlist tickers available.")
         else:
+            source_map_df["delete"] = False
+            source_map_df = source_map_df[["delete", "ticker", "google_query", "sec_cik", "sec_company_name", "updated_at"]]
+
             edited_df = st.data_editor(
                 source_map_df,
                 use_container_width=True,
                 hide_index=True,
                 disabled=["ticker", "updated_at"],
                 column_config={
+                    "delete": st.column_config.CheckboxColumn("delete"),
                     "ticker": st.column_config.TextColumn("ticker"),
                     "google_query": st.column_config.TextColumn("google_query"),
                     "sec_cik": st.column_config.TextColumn("sec_cik"),
                     "sec_company_name": st.column_config.TextColumn("sec_company_name"),
                     "updated_at": st.column_config.TextColumn("updated_at"),
                 },
+                key="ticker_admin_data_editor",
             )
 
-            if st.button("Save Ticker Admin", type="primary"):
-                save_source_map_rows(conn, edited_df)
-                st.success("Source mapping saved.")
-                st.rerun()
-
-            st.markdown("---")
-            st.subheader("Remove ticker")
-            remove_ticker = st.selectbox(
-                "Select ticker to remove",
-                options=source_map_df["ticker"].tolist(),
-                key="ticker_admin_remove_select",
-            )
-            if st.button("Remove Ticker", key="ticker_admin_remove_btn"):
-                remove_watchlist_ticker(conn, remove_ticker)
-                st.success(f"Removed {remove_ticker} from watchlist and ticker mappings.")
-                st.rerun()
+            save_col, delete_col = st.columns([1, 1], gap="small")
+            with save_col:
+                if st.button("Save Ticker Admin", type="primary"):
+                    save_df = edited_df[["ticker", "google_query", "sec_cik", "sec_company_name", "updated_at"]].copy()
+                    save_source_map_rows(conn, save_df)
+                    st.success("Source mapping saved.")
+                    st.rerun()
+            with delete_col:
+                if st.button("Delete selected", key="ticker_admin_delete_selected_btn"):
+                    selected_tickers = edited_df.loc[edited_df["delete"] == True, "ticker"].tolist()
+                    if not selected_tickers:
+                        st.warning("No tickers selected for deletion.")
+                    else:
+                        deleted_count = delete_watchlist_tickers(conn, selected_tickers)
+                        st.success(f"Deleted {deleted_count} ticker(s) from watchlist and ticker mappings.")
+                        st.rerun()
     else:
         st.title(f"{selected_window_hours}h Company News Dashboard")
 
