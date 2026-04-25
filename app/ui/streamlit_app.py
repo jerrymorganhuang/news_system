@@ -558,6 +558,22 @@ def save_source_map_rows(conn, source_map_df):
     cursor = conn.cursor()
     now_str = utc_now().strftime("%Y-%m-%d %H:%M:%S")
 
+    existing_rows = cursor.execute(
+        """
+        SELECT ticker, google_query, sec_cik, sec_company_name
+        FROM ticker_source_map
+        """
+    ).fetchall()
+    existing_by_ticker = {
+        normalize_ticker(row[0]): {
+            "google_query": (row[1] or "").strip(),
+            "sec_cik": (row[2] or "").strip(),
+            "sec_company_name": (row[3] or "").strip(),
+        }
+        for row in existing_rows
+        if normalize_ticker(row[0])
+    }
+
     for _, row in source_map_df.iterrows():
         ticker = normalize_ticker(row.get("ticker", ""))
         if not ticker:
@@ -566,6 +582,21 @@ def save_source_map_rows(conn, source_map_df):
         google_query = (row.get("google_query", "") or "").strip() or ticker
         sec_cik = (row.get("sec_cik", "") or "").strip()
         sec_company_name = (row.get("sec_company_name", "") or "").strip()
+
+        existing = existing_by_ticker.get(ticker)
+        existing_google_query = (existing.get("google_query") or ticker) if existing else None
+        existing_sec_cik = existing.get("sec_cik", "") if existing else None
+        existing_sec_company_name = existing.get("sec_company_name", "") if existing else None
+
+        row_changed = (
+            existing is None
+            or google_query != existing_google_query
+            or sec_cik != existing_sec_cik
+            or sec_company_name != existing_sec_company_name
+        )
+
+        if not row_changed:
+            continue
 
         cursor.execute(
             """
