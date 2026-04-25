@@ -1237,11 +1237,11 @@ try:
                 disabled=["ticker", "updated_at"],
                 column_config={
                     "delete": st.column_config.CheckboxColumn("delete", width="small"),
-                    "ticker": st.column_config.TextColumn("ticker"),
-                    "google_query": st.column_config.TextColumn("google_query"),
-                    "sec_cik": st.column_config.TextColumn("sec_cik", width="medium"),
-                    "sec_company_name": st.column_config.TextColumn("sec_company_name"),
-                    "updated_at": st.column_config.TextColumn("updated_at", width="small"),
+                    "ticker": st.column_config.TextColumn("ticker", width="small"),
+                    "google_query": st.column_config.TextColumn("google_query", width="medium"),
+                    "sec_cik": st.column_config.TextColumn("sec_cik", width="small"),
+                    "sec_company_name": st.column_config.TextColumn("sec_company_name", width="medium"),
+                    "updated_at": st.column_config.TextColumn("updated_at", width="medium"),
                 },
                 key="ticker_admin_data_editor",
             )
