@@ -1211,7 +1211,7 @@ try:
         with toolbar_col2:
             admin_add_clicked = st.button("Add", use_container_width=True, key="ticker_admin_add_btn")
         with toolbar_col3:
-            save_clicked = st.button("Save Changes", type="primary", use_container_width=True, key="ticker_admin_save_btn")
+            save_clicked = st.button("Save Changes", use_container_width=True, key="ticker_admin_save_btn")
         with toolbar_col4:
             delete_clicked = st.button("Delete Selected", use_container_width=True, key="ticker_admin_delete_selected_btn")
 
@@ -1226,6 +1226,7 @@ try:
         if source_map_df.empty:
             st.info("No watchlist tickers available.")
         else:
+            source_map_df["updated_at"] = source_map_df["updated_at"].apply(format_time)
             source_map_df["delete"] = False
             source_map_df = source_map_df[["delete", "ticker", "google_query", "sec_cik", "sec_company_name", "updated_at"]]
 
@@ -1235,12 +1236,12 @@ try:
                 hide_index=True,
                 disabled=["ticker", "updated_at"],
                 column_config={
-                    "delete": st.column_config.CheckboxColumn("delete"),
+                    "delete": st.column_config.CheckboxColumn("delete", width="small"),
                     "ticker": st.column_config.TextColumn("ticker"),
                     "google_query": st.column_config.TextColumn("google_query"),
-                    "sec_cik": st.column_config.TextColumn("sec_cik"),
+                    "sec_cik": st.column_config.TextColumn("sec_cik", width="medium"),
                     "sec_company_name": st.column_config.TextColumn("sec_company_name"),
-                    "updated_at": st.column_config.TextColumn("updated_at"),
+                    "updated_at": st.column_config.TextColumn("updated_at", width="small"),
                 },
                 key="ticker_admin_data_editor",
             )
