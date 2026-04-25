@@ -2,8 +2,21 @@ import argparse
 import sqlite3
 
 
+REQUIRED_TABLES = {
+    "watchlist",
+    "articles",
+    "company_digest",
+}
+
+REQUIRED_ARTICLES_COLUMNS = {
+    "content",
+    "content_status",
+    "content_error",
+}
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Show SQLite schema details")
+    parser = argparse.ArgumentParser(description="Validate SQLite schema")
     parser.add_argument(
         "--db",
         default="data/news.db",
@@ -16,27 +29,30 @@ def main() -> None:
         cursor = conn.cursor()
 
         cursor.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
         )
-        tables = [row[0] for row in cursor.fetchall()]
+        tables = {row[0] for row in cursor.fetchall()}
 
-        if not tables:
-            print(f"No user tables found in {args.db}")
-            return
+        missing_items: list[str] = []
 
-        print(f"Database: {args.db}")
-        print("Tables:")
-        for table in tables:
-            print(f"\n- {table}")
-            cursor.execute(f"PRAGMA table_info({table})")
-            for col in cursor.fetchall():
-                cid, name, ctype, notnull, default_value, pk = col
-                print(
-                    f"  {cid}: {name} {ctype}"
-                    f"{' NOT NULL' if notnull else ''}"
-                    f"{' PRIMARY KEY' if pk else ''}"
-                    f" DEFAULT {default_value}" if default_value is not None else ""
-                )
+        missing_tables = sorted(REQUIRED_TABLES - tables)
+        for table in missing_tables:
+            missing_items.append(f"missing table: {table}")
+
+        if "articles" in tables:
+            cursor.execute("PRAGMA table_info(articles)")
+            article_columns = {row[1] for row in cursor.fetchall()}
+            missing_columns = sorted(REQUIRED_ARTICLES_COLUMNS - article_columns)
+            for column in missing_columns:
+                missing_items.append(f"missing articles column: {column}")
+
+        if missing_items:
+            print("Schema check failed.")
+            for item in missing_items:
+                print(item)
+            raise SystemExit(1)
+
+        print("Schema check passed.")
     finally:
         conn.close()
 
