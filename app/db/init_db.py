@@ -37,6 +37,8 @@ def init_db():
         url TEXT NOT NULL,
         published_at TEXT,
         content TEXT,
+        content_status TEXT,
+        content_error TEXT,
         fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         UNIQUE(ticker, url)
     )
@@ -44,12 +46,15 @@ def init_db():
 
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS company_digest (
-        ticker TEXT PRIMARY KEY,
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ticker TEXT NOT NULL,
+        window_hours INTEGER NOT NULL,
         window_start TEXT NOT NULL,
         window_end TEXT NOT NULL,
         article_count INTEGER DEFAULT 0,
         summary TEXT,
-        generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(ticker, window_hours)
     )
     """)
 

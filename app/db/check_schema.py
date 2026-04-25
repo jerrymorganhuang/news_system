@@ -14,6 +14,16 @@ REQUIRED_ARTICLES_COLUMNS = {
     "content_error",
 }
 
+REQUIRED_COMPANY_DIGEST_COLUMNS = {
+    "ticker",
+    "window_hours",
+    "window_start",
+    "window_end",
+    "article_count",
+    "summary",
+    "generated_at",
+}
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Validate SQLite schema")
@@ -45,6 +55,13 @@ def main() -> None:
             missing_columns = sorted(REQUIRED_ARTICLES_COLUMNS - article_columns)
             for column in missing_columns:
                 missing_items.append(f"missing articles column: {column}")
+
+        if "company_digest" in tables:
+            cursor.execute("PRAGMA table_info(company_digest)")
+            digest_columns = {row[1] for row in cursor.fetchall()}
+            missing_columns = sorted(REQUIRED_COMPANY_DIGEST_COLUMNS - digest_columns)
+            for column in missing_columns:
+                missing_items.append(f"missing company_digest column: {column}")
 
         if missing_items:
             print("Schema check failed.")

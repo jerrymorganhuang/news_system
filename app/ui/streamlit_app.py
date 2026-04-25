@@ -20,13 +20,12 @@ PROCESS_SCRIPT_PATH = os.path.join(BASE_DIR, "app", "processors", "process_artic
 SUMMARIZE_SCRIPT_PATH = os.path.join(BASE_DIR, "app", "summarizers", "summarize_by_company.py")
 RESET_DB_PATH = os.path.join(BASE_DIR, "app", "db", "reset_news_data.py")
 
-LOOKBACK_HOURS = 48
 WATCHLIST_CHIPS_PER_ROW = 4
 
 
 # ========= Page Config =========
 st.set_page_config(
-    page_title="48h Company News Intelligence",
+    page_title="Company News Intelligence",
     layout="wide"
 )
 
@@ -320,7 +319,7 @@ def utc_now():
     return datetime.now(timezone.utc)
 
 
-def cutoff_str(hours=48):
+def cutoff_str(hours):
     cutoff = utc_now() - timedelta(hours=hours)
     return cutoff.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -475,12 +474,88 @@ def remove_watchlist_ticker(conn, ticker):
 
 
 # ========= Digest / Articles =========
-def get_company_digest(conn, ticker):
+def ensure_company_digest_schema(conn):
+    cursor = conn.cursor()
+    table_exists = cursor.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='company_digest' LIMIT 1"
+    ).fetchone()
+
+    if not table_exists:
+        cursor.execute(
+            """
+            CREATE TABLE company_digest (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticker TEXT NOT NULL,
+                window_hours INTEGER NOT NULL,
+                window_start TEXT NOT NULL,
+                window_end TEXT NOT NULL,
+                article_count INTEGER DEFAULT 0,
+                summary TEXT,
+                generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(ticker, window_hours)
+            )
+            """
+        )
+        conn.commit()
+        return
+
+    cursor.execute("PRAGMA table_info(company_digest)")
+    columns = {row[1] for row in cursor.fetchall()}
+    if "window_hours" not in columns:
+        cursor.execute("ALTER TABLE company_digest RENAME TO company_digest_legacy")
+        cursor.execute(
+            """
+            CREATE TABLE company_digest (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticker TEXT NOT NULL,
+                window_hours INTEGER NOT NULL,
+                window_start TEXT NOT NULL,
+                window_end TEXT NOT NULL,
+                article_count INTEGER DEFAULT 0,
+                summary TEXT,
+                generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(ticker, window_hours)
+            )
+            """
+        )
+        cursor.execute(
+            """
+            INSERT INTO company_digest (
+                ticker,
+                window_hours,
+                window_start,
+                window_end,
+                article_count,
+                summary,
+                generated_at
+            )
+            SELECT
+                ticker,
+                48 AS window_hours,
+                COALESCE(window_start, datetime('now', '-48 hours')),
+                COALESCE(window_end, datetime('now')),
+                COALESCE(article_count, 0),
+                summary,
+                COALESCE(generated_at, CURRENT_TIMESTAMP)
+            FROM company_digest_legacy
+            """
+        )
+        cursor.execute("DROP TABLE company_digest_legacy")
+
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_company_digest_ticker_window "
+        "ON company_digest(ticker, window_hours)"
+    )
+    conn.commit()
+
+
+def get_company_digest(conn, ticker, window_hours):
     candidate_queries = [
         """
         SELECT summary, generated_at
         FROM company_digest
         WHERE ticker = ?
+          AND window_hours = ?
         ORDER BY generated_at DESC
         LIMIT 1
         """,
@@ -488,6 +563,7 @@ def get_company_digest(conn, ticker):
         SELECT digest, generated_at
         FROM company_digest
         WHERE ticker = ?
+          AND window_hours = ?
         ORDER BY generated_at DESC
         LIMIT 1
         """,
@@ -495,6 +571,7 @@ def get_company_digest(conn, ticker):
         SELECT ai_summary, generated_at
         FROM company_digest
         WHERE ticker = ?
+          AND window_hours = ?
         ORDER BY generated_at DESC
         LIMIT 1
         """
@@ -502,7 +579,7 @@ def get_company_digest(conn, ticker):
 
     for query in candidate_queries:
         try:
-            row = conn.execute(query, (ticker,)).fetchone()
+            row = conn.execute(query, (ticker, window_hours)).fetchone()
             if row:
                 return {
                     "summary": row[0] or "",
@@ -517,31 +594,31 @@ def get_company_digest(conn, ticker):
     }
 
 
-def get_article_count_48h(conn, ticker):
+def get_article_count(conn, ticker, lookback_hours):
     query = """
         SELECT COUNT(*)
         FROM articles
         WHERE ticker = ?
-          AND published_at >= ?
+          AND datetime(COALESCE(published_at, fetched_at)) >= datetime(?)
     """
-    row = conn.execute(query, (ticker, cutoff_str(LOOKBACK_HOURS))).fetchone()
+    row = conn.execute(query, (ticker, cutoff_str(lookback_hours))).fetchone()
     return row[0] if row else 0
 
 
-def get_articles_48h(conn, ticker):
+def get_articles(conn, ticker, lookback_hours):
     query = """
         SELECT
             ticker,
-            published_at,
+            COALESCE(published_at, fetched_at) as article_time,
             source,
             title,
             url
         FROM articles
         WHERE ticker = ?
-          AND published_at >= ?
-        ORDER BY published_at DESC
+          AND datetime(COALESCE(published_at, fetched_at)) >= datetime(?)
+        ORDER BY datetime(COALESCE(published_at, fetched_at)) DESC
     """
-    rows = conn.execute(query, (ticker, cutoff_str(LOOKBACK_HOURS))).fetchall()
+    rows = conn.execute(query, (ticker, cutoff_str(lookback_hours))).fetchall()
 
     data = []
     for row in rows:
@@ -680,16 +757,16 @@ def get_market_snapshot(ticker):
         }
 
 
-def build_dashboard_rows(conn):
+def build_dashboard_rows(conn, window_hours):
     watchlist_rows = get_watchlist_rows(conn)
     results = []
 
     for item in watchlist_rows:
         ticker = item["ticker"]
         company_name = item["company_name"] or ticker
-        digest = get_company_digest(conn, ticker)
-        article_count = get_article_count_48h(conn, ticker)
-        articles_df = get_articles_48h(conn, ticker)
+        digest = get_company_digest(conn, ticker, window_hours)
+        article_count = get_article_count(conn, ticker, window_hours)
+        articles_df = get_articles(conn, ticker, window_hours)
         market = get_market_snapshot(ticker)
 
         results.append({
@@ -711,13 +788,16 @@ def build_dashboard_rows(conn):
 
 
 # ========= Script Runner =========
-def run_python_script(script_path):
+def run_python_script(script_path, args=None):
     if not os.path.exists(script_path):
         return False, f"Script not found: {script_path}"
 
     try:
+        cmd = [sys.executable, script_path]
+        if args:
+            cmd.extend(args)
         result = subprocess.run(
-            [sys.executable, script_path],
+            cmd,
             cwd=BASE_DIR,
             capture_output=True,
             text=True
@@ -740,7 +820,7 @@ def run_pipeline_with_progress():
     steps = [
         ("Step 1/3 - Fetching news", FETCH_SCRIPT_PATH),
         ("Step 2/3 - Processing articles", PROCESS_SCRIPT_PATH),
-        ("Step 3/3 - Generating AI summaries", SUMMARIZE_SCRIPT_PATH),
+        ("Step 3/3 - Generating AI summaries", SUMMARIZE_SCRIPT_PATH, ["--window-hours", "24"]),
     ]
 
     progress_placeholder = st.sidebar.empty()
@@ -750,12 +830,17 @@ def run_pipeline_with_progress():
     progress_bar = progress_placeholder.progress(0, text="Starting pipeline...")
     all_logs = []
 
-    for idx, (label, script_path) in enumerate(steps, start=1):
+    for idx, step in enumerate(steps, start=1):
+        if len(step) == 3:
+            label, script_path, script_args = step
+        else:
+            label, script_path = step
+            script_args = None
         pct_before = int(((idx - 1) / len(steps)) * 100)
         progress_bar.progress(pct_before, text=label)
         status_placeholder.info(label)
 
-        ok, msg = run_python_script(script_path)
+        ok, msg = run_python_script(script_path, args=script_args)
 
         all_logs.append(f"===== {label} =====")
         all_logs.append(msg)
@@ -822,9 +907,6 @@ def confirm_delete_dialog(ticker):
 
 
 # ========= Page =========
-st.title("48h Company News Intelligence Dashboard")
-st.caption("Rolling 48-hour company news dashboard with AI-generated company digests")
-
 if not os.path.exists(DB_PATH):
     st.error(f"Database not found: {DB_PATH}")
     st.stop()
@@ -834,11 +916,19 @@ if not os.path.exists(DB_PATH):
 conn = get_connection()
 
 try:
+    ensure_company_digest_schema(conn)
+
     watchlist_rows = get_watchlist_rows(conn)
     watchlist_tickers = sorted([row["ticker"] for row in watchlist_rows])
 
     # ----- Sidebar -----
     st.sidebar.caption("Display")
+    window_label = st.sidebar.selectbox(
+        "News Window",
+        options=["24h", "48h"],
+        index=0,
+    )
+    selected_window_hours = int(window_label.replace("h", ""))
 
     hide_empty = st.sidebar.checkbox(
         "Hide tickers with no data",
@@ -966,8 +1056,19 @@ try:
     if st.session_state["pending_delete_ticker"]:
         confirm_delete_dialog(st.session_state["pending_delete_ticker"])
 
+    st.title(f"{selected_window_hours}h Company News Dashboard")
+    st.caption(
+        f"Rolling {selected_window_hours}-hour company news dashboard with AI-generated company digests"
+    )
+
+    if watchlist_tickers:
+        with st.spinner(f"Ensuring {selected_window_hours}h digests..."):
+            run_python_script(
+                SUMMARIZE_SCRIPT_PATH, args=["--window-hours", str(selected_window_hours)]
+            )
+
     # ----- Main -----
-    dashboard_rows = build_dashboard_rows(conn)
+    dashboard_rows = build_dashboard_rows(conn, selected_window_hours)
 
     if hide_empty:
         dashboard_rows = [row for row in dashboard_rows if row["has_data"]]
@@ -987,7 +1088,10 @@ try:
     overview_col1, overview_col2, overview_col3 = st.columns(3)
     overview_col1.metric("Displayed tickers", len(dashboard_rows))
     overview_col2.metric("Tickers with data", sum(1 for row in dashboard_rows if row["has_data"]))
-    overview_col3.metric("Articles (48h)", sum(row["article_count"] for row in dashboard_rows))
+    overview_col3.metric(
+        f"Articles ({selected_window_hours}h)",
+        sum(row["article_count"] for row in dashboard_rows),
+    )
 
     st.markdown("---")
 
@@ -1015,11 +1119,11 @@ try:
         )
         st.markdown(header_html, unsafe_allow_html=True)
 
-        summary_label = "AI Summary"
+        summary_label = f"AI Summary · {selected_window_hours}h"
         if generated_at:
             updated_label = format_digest_updated_time(generated_at)
             if updated_label:
-                summary_label = f"AI Summary · Updated: {updated_label}"
+                summary_label = f"AI Summary · {selected_window_hours}h · Updated: {updated_label}"
 
         st.markdown(
             f'<div class="summary-label">{summary_label}</div>',
