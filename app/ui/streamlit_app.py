@@ -264,6 +264,28 @@ st.markdown(
     section[data-testid="stSidebar"] div[data-testid="column"] .stButton > button:hover {
         border-color: rgba(120, 120, 120, 0.8) !important;
     }
+
+    .watchlist-inline {
+        font-size: 12px !important;
+        line-height: 1.45 !important;
+        color: #334155;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+        margin-bottom: 0.15rem;
+    }
+
+    .watchlist-empty-inline {
+        font-size: 12px !important;
+        color: #64748b;
+        margin-bottom: 0.15rem;
+    }
+
+    @media (max-width: 768px) {
+        section[data-testid="stSidebar"] .block-container {
+            padding-left: 0.5rem !important;
+            padding-right: 0.5rem !important;
+        }
+    }
     </style>
     """,
     unsafe_allow_html=True
@@ -754,6 +776,9 @@ if "pipeline_log" not in st.session_state:
 if "pipeline_status" not in st.session_state:
     st.session_state["pipeline_status"] = ""
 
+if "watchlist_manage_mode" not in st.session_state:
+    st.session_state["watchlist_manage_mode"] = False
+
 
 # ========= Delete Dialog =========
 @st.dialog("Confirm delete")
@@ -871,26 +896,44 @@ try:
             st.sidebar.error(str(e))
 
     if watchlist_tickers:
-        st.sidebar.caption("Current watchlist")
+        st.sidebar.caption(f"Watchlist ({len(watchlist_tickers)})")
 
-        for i in range(0, len(watchlist_tickers), WATCHLIST_CHIPS_PER_ROW):
-            row_tickers = watchlist_tickers[i:i + WATCHLIST_CHIPS_PER_ROW]
-            cols = st.sidebar.columns(WATCHLIST_CHIPS_PER_ROW, gap="small")
+        if st.session_state["watchlist_manage_mode"]:
+            for i in range(0, len(watchlist_tickers), WATCHLIST_CHIPS_PER_ROW):
+                row_tickers = watchlist_tickers[i:i + WATCHLIST_CHIPS_PER_ROW]
+                cols = st.sidebar.columns(WATCHLIST_CHIPS_PER_ROW, gap="small")
 
-            for j in range(WATCHLIST_CHIPS_PER_ROW):
-                with cols[j]:
-                    if j < len(row_tickers):
-                        ticker = row_tickers[j]
-                        if st.button(
-                            f"× {ticker}",
-                            key=f"delete_btn_{ticker}",
-                            use_container_width=True
-                        ):
-                            st.session_state["pending_delete_ticker"] = ticker
-                    else:
-                        st.write("")
+                for j in range(WATCHLIST_CHIPS_PER_ROW):
+                    with cols[j]:
+                        if j < len(row_tickers):
+                            ticker = row_tickers[j]
+                            if st.button(
+                                f"{ticker} ×",
+                                key=f"delete_btn_{ticker}",
+                                use_container_width=True
+                            ):
+                                st.session_state["pending_delete_ticker"] = ticker
+                        else:
+                            st.write("")
+
+            if st.sidebar.button("Done", key="watchlist_done_btn", use_container_width=False):
+                st.session_state["watchlist_manage_mode"] = False
+                st.rerun()
+        else:
+            watchlist_inline = " · ".join(watchlist_tickers)
+            st.sidebar.markdown(
+                f'<div class="watchlist-inline">{watchlist_inline}</div>',
+                unsafe_allow_html=True
+            )
+            if st.sidebar.button("Manage", key="watchlist_manage_btn", use_container_width=False):
+                st.session_state["watchlist_manage_mode"] = True
+                st.rerun()
     else:
-        st.sidebar.info("Watchlist is empty.")
+        st.sidebar.caption("Watchlist (0)")
+        st.sidebar.markdown(
+            '<div class="watchlist-empty-inline">No tickers yet.</div>',
+            unsafe_allow_html=True
+        )
 
     if st.session_state["pipeline_log"]:
         with st.sidebar.expander("Last run log", expanded=False):
