@@ -467,6 +467,26 @@ def add_watchlist_ticker(conn, ticker):
         """,
         (ticker, "", ticker)
     )
+
+    existing_source_map = cursor.execute(
+        "SELECT 1 FROM ticker_source_map WHERE ticker = ? LIMIT 1",
+        (ticker,),
+    ).fetchone()
+    if not existing_source_map:
+        cursor.execute(
+            """
+            INSERT INTO ticker_source_map (
+                ticker,
+                google_query,
+                sec_cik,
+                sec_company_name,
+                updated_at
+            )
+            VALUES (?, ?, NULL, NULL, CURRENT_TIMESTAMP)
+            """,
+            (ticker, ticker),
+        )
+
     conn.commit()
 
 
@@ -474,6 +494,7 @@ def remove_watchlist_ticker(conn, ticker):
     ticker = normalize_ticker(ticker)
     cursor = conn.cursor()
     cursor.execute("DELETE FROM watchlist WHERE ticker = ?", (ticker,))
+    cursor.execute("DELETE FROM ticker_source_map WHERE ticker = ?", (ticker,))
     conn.commit()
 
 
@@ -1023,43 +1044,14 @@ def run_pipeline_with_progress():
 
 
 # ========= Session State =========
-if "pending_delete_ticker" not in st.session_state:
-    st.session_state["pending_delete_ticker"] = None
-
 if "pipeline_log" not in st.session_state:
     st.session_state["pipeline_log"] = ""
 
 if "pipeline_status" not in st.session_state:
     st.session_state["pipeline_status"] = ""
 
-if "watchlist_manage_mode" not in st.session_state:
-    st.session_state["watchlist_manage_mode"] = False
-
 if "page_mode" not in st.session_state:
     st.session_state["page_mode"] = "Dashboard"
-
-
-# ========= Delete Dialog =========
-@st.dialog("Confirm delete")
-def confirm_delete_dialog(ticker):
-    st.write(f"Remove **{ticker}** from watchlist?")
-    col1, col2 = st.columns(2)
-
-    with col1:
-        if st.button("Delete", key=f"confirm_delete_{ticker}", use_container_width=True):
-            conn = get_connection()
-            try:
-                remove_watchlist_ticker(conn, ticker)
-            finally:
-                conn.close()
-
-            st.session_state["pending_delete_ticker"] = None
-            st.rerun()
-
-    with col2:
-        if st.button("Cancel", key=f"cancel_delete_{ticker}", use_container_width=True):
-            st.session_state["pending_delete_ticker"] = None
-            st.rerun()
 
 
 # ========= Page =========
@@ -1162,37 +1154,11 @@ try:
 
     if watchlist_tickers:
         st.sidebar.caption(f"Watchlist ({len(watchlist_tickers)})")
-
-        if st.session_state["watchlist_manage_mode"]:
-            for i in range(0, len(watchlist_tickers), WATCHLIST_CHIPS_PER_ROW):
-                row_tickers = watchlist_tickers[i:i + WATCHLIST_CHIPS_PER_ROW]
-                cols = st.sidebar.columns(WATCHLIST_CHIPS_PER_ROW, gap="small")
-
-                for j in range(WATCHLIST_CHIPS_PER_ROW):
-                    with cols[j]:
-                        if j < len(row_tickers):
-                            ticker = row_tickers[j]
-                            if st.button(
-                                f"{ticker}",
-                                key=f"delete_btn_{ticker}",
-                                use_container_width=True
-                            ):
-                                st.session_state["pending_delete_ticker"] = ticker
-                        else:
-                            st.write("")
-
-            if st.sidebar.button("Done", key="watchlist_done_btn", use_container_width=False):
-                st.session_state["watchlist_manage_mode"] = False
-                st.rerun()
-        else:
-            watchlist_inline = " · ".join(watchlist_tickers)
-            st.sidebar.markdown(
-                f'<div class="watchlist-inline">{watchlist_inline}</div>',
-                unsafe_allow_html=True
-            )
-            if st.sidebar.button("Manage", key="watchlist_manage_btn", use_container_width=False):
-                st.session_state["watchlist_manage_mode"] = True
-                st.rerun()
+        watchlist_inline = " · ".join(watchlist_tickers)
+        st.sidebar.markdown(
+            f'<div class="watchlist-inline">{watchlist_inline}</div>',
+            unsafe_allow_html=True
+        )
     else:
         st.sidebar.caption("Watchlist (0)")
         st.sidebar.markdown(
@@ -1204,7 +1170,7 @@ try:
 
     page_mode = st.sidebar.selectbox(
         "Page",
-        options=["Dashboard", "Source Mapping"],
+        options=["Dashboard", "Ticker Admin"],
         key="page_mode",
     )
 
@@ -1217,11 +1183,8 @@ try:
                 label_visibility="collapsed"
             )
 
-    if st.session_state["pending_delete_ticker"]:
-        confirm_delete_dialog(st.session_state["pending_delete_ticker"])
-
-    if page_mode == "Source Mapping":
-        st.title("Source Mapping")
+    if page_mode == "Ticker Admin":
+        st.title("Ticker Admin")
         st.caption(
             "Manage per-source identifiers for watchlist tickers. "
             "This page only stores mappings; fetch behavior is unchanged."
@@ -1245,9 +1208,21 @@ try:
                 },
             )
 
-            if st.button("Save Source Mapping", type="primary"):
+            if st.button("Save Ticker Admin", type="primary"):
                 save_source_map_rows(conn, edited_df)
                 st.success("Source mapping saved.")
+                st.rerun()
+
+            st.markdown("---")
+            st.subheader("Remove ticker")
+            remove_ticker = st.selectbox(
+                "Select ticker to remove",
+                options=source_map_df["ticker"].tolist(),
+                key="ticker_admin_remove_select",
+            )
+            if st.button("Remove Ticker", key="ticker_admin_remove_btn"):
+                remove_watchlist_ticker(conn, remove_ticker)
+                st.success(f"Removed {remove_ticker} from watchlist and ticker mappings.")
                 st.rerun()
     else:
         st.title(f"{selected_window_hours}h Company News Dashboard")
