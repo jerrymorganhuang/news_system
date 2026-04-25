@@ -795,6 +795,61 @@ try:
     watchlist_tickers = sorted([row["ticker"] for row in watchlist_rows])
 
     # ----- Sidebar -----
+    st.sidebar.caption("Display")
+
+    hide_empty = st.sidebar.checkbox(
+        "Hide tickers with no data",
+        value=False
+    )
+
+    sort_option = st.sidebar.selectbox(
+        "Sort by",
+        ["Ticker A-Z", "News count (high to low)"],
+        index=0
+    )
+
+    st.sidebar.divider()
+
+    st.sidebar.caption("Actions")
+
+    action_col1, action_col2, action_col3 = st.sidebar.columns(3, gap="small")
+
+    with action_col1:
+        run_clicked = st.button("Run", use_container_width=True)
+    with action_col2:
+        refresh_clicked = st.button("Refresh", use_container_width=True)
+    with action_col3:
+        reset_clicked = st.button("Reset", use_container_width=True)
+
+    if run_clicked:
+        success = run_pipeline_with_progress()
+        if success:
+            st.rerun()
+
+    if refresh_clicked:
+        st.rerun()
+
+    confirm_reset = st.sidebar.checkbox(
+        "I understand this will clear all news data",
+        value=False,
+        key="confirm_reset_database"
+    )
+
+    if reset_clicked:
+        if not confirm_reset:
+            st.sidebar.warning("Please confirm reset first.")
+        else:
+            ok, msg = run_python_script(RESET_DB_PATH)
+            st.session_state["pipeline_log"] = msg
+            st.session_state["pipeline_status"] = "success" if ok else "failed"
+
+            if ok:
+                st.rerun()
+            else:
+                st.sidebar.error("Database reset failed.")
+
+    st.sidebar.divider()
+
     st.sidebar.markdown("### Watchlist")
 
     add_col1, add_col2 = st.sidebar.columns([4, 1.2], gap="small")
@@ -836,52 +891,6 @@ try:
                         st.write("")
     else:
         st.sidebar.info("Watchlist is empty.")
-
-    st.sidebar.divider()
-
-    st.sidebar.caption("Display")
-
-    hide_empty = st.sidebar.checkbox(
-        "Hide tickers with no data",
-        value=False
-    )
-
-    sort_option = st.sidebar.selectbox(
-        "Sort by",
-        ["Ticker A-Z", "News count (high to low)"],
-        index=0
-    )
-
-    st.sidebar.divider()
-
-    st.sidebar.caption("Actions")
-
-    if st.sidebar.button("Run pipeline", use_container_width=True):
-        success = run_pipeline_with_progress()
-        if success:
-            st.rerun()
-
-    if st.sidebar.button("Refresh page", use_container_width=True):
-        st.rerun()
-
-    confirm_reset = st.sidebar.checkbox(
-        "I understand this will clear all news data",
-        value=False,
-        key="confirm_reset_database"
-    )
-
-    if st.sidebar.button("Reset database", use_container_width=True):
-        if not confirm_reset:
-            st.sidebar.warning("Please confirm reset first.")
-        else:
-            ok, msg = run_python_script(RESET_DB_PATH)
-            st.session_state["pipeline_log"] = msg
-            st.session_state["pipeline_status"] = "success" if ok else "failed"
-
-            if ok:
-                st.rerun()
-            else:
-                st.sidebar.error("Database reset failed.")
 
     if st.session_state["pipeline_log"]:
         with st.sidebar.expander("Last run log", expanded=False):
