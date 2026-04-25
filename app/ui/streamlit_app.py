@@ -21,7 +21,7 @@ SUMMARIZE_SCRIPT_PATH = os.path.join(BASE_DIR, "app", "summarizers", "summarize_
 RESET_DB_PATH = os.path.join(BASE_DIR, "app", "db", "reset_news_data.py")
 
 LOOKBACK_HOURS = 48
-WATCHLIST_CHIPS_PER_ROW = 4
+WATCHLIST_CHIPS_PER_ROW = 5
 
 
 # ========= Page Config =========
@@ -246,6 +246,24 @@ st.markdown(
         padding: 0.08rem 0.4rem !important;
         font-size: 12px !important;
         border-radius: 8px !important;
+    }
+
+    section[data-testid="stSidebar"] .st-key-watchlist_add_ticker_input .stTextInput > div > div > input {
+        height: 26px !important;
+        min-height: 26px !important;
+        padding-top: 0.02rem !important;
+        padding-bottom: 0.02rem !important;
+        padding-left: 0.38rem !important;
+        padding-right: 0.38rem !important;
+        font-size: 11px !important;
+    }
+
+    section[data-testid="stSidebar"] .st-key-watchlist_add_btn .stButton > button {
+        height: 26px !important;
+        min-height: 26px !important;
+        padding: 0.02rem 0.3rem !important;
+        font-size: 11px !important;
+        border-radius: 7px !important;
     }
 
     section[data-testid="stSidebar"] div[data-testid="column"] .stButton > button {
@@ -883,10 +901,11 @@ try:
             "Add ticker",
             value="",
             placeholder="NVDA",
-            label_visibility="collapsed"
+            label_visibility="collapsed",
+            key="watchlist_add_ticker_input"
         )
     with add_col2:
-        add_clicked = st.button("Add", use_container_width=True)
+        add_clicked = st.button("Add", use_container_width=True, key="watchlist_add_btn")
 
     if add_clicked:
         try:
@@ -908,7 +927,7 @@ try:
                         if j < len(row_tickers):
                             ticker = row_tickers[j]
                             if st.button(
-                                f"{ticker} ×",
+                                f"{ticker}",
                                 key=f"delete_btn_{ticker}",
                                 use_container_width=True
                             ):
