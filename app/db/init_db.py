@@ -68,6 +68,36 @@ def init_db():
     )
     """)
 
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS sec_filings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ticker TEXT NOT NULL,
+        cik TEXT NOT NULL,
+        accession_number TEXT NOT NULL,
+        form_type TEXT NOT NULL,
+        filing_date TEXT,
+        accepted_datetime TEXT,
+        report_date TEXT,
+        item_numbers TEXT,
+        primary_doc TEXT,
+        primary_doc_url TEXT,
+        filing_detail_url TEXT,
+        title TEXT,
+        fetched_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(cik, accession_number)
+    )
+    """)
+
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sec_filings_ticker ON sec_filings(ticker)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sec_filings_filing_date ON sec_filings(filing_date)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sec_filings_accepted_datetime ON sec_filings(accepted_datetime)"
+    )
+
     cursor.execute(
         """
         INSERT INTO ticker_source_map (
