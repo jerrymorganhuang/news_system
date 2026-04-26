@@ -1319,7 +1319,7 @@ try:
             delete_clicked = st.button("Delete Selected", use_container_width=True, key="ticker_admin_delete_selected_btn")
         with toolbar_col5:
             refresh_sec_mapping_clicked = st.button(
-                "Refresh SEC Mapping",
+                "Refresh SEC",
                 use_container_width=True,
                 key="ticker_admin_refresh_sec_mapping_btn",
             )
