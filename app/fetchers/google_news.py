@@ -105,10 +105,17 @@ def get_db_connection():
 def get_watchlist(conn):
     cursor = conn.cursor()
     cursor.execute("""
-        SELECT ticker, company_name, google_query
-        FROM watchlist
-        WHERE google_query IS NOT NULL
-          AND google_query != ''
+        SELECT
+            w.ticker,
+            w.company_name,
+            COALESCE(
+                NULLIF(tsm.google_query, ''),
+                NULLIF(w.company_name, ''),
+                w.ticker
+            ) AS google_query
+        FROM watchlist w
+        LEFT JOIN ticker_source_map tsm
+          ON tsm.ticker = w.ticker
     """)
     return cursor.fetchall()
 
