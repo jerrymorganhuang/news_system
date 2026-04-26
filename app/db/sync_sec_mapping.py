@@ -1,6 +1,8 @@
 import json
 import os
 import sqlite3
+import time
+import gzip
 import urllib.request
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -26,11 +28,32 @@ def format_cik_10_digits(raw_cik):
 def download_sec_mapping():
     request = urllib.request.Request(
         SEC_MAPPING_URL,
-        headers={"User-Agent": "news-system/1.0 (local sec mapping sync)"},
+        headers={
+            "User-Agent": "news_system admin@example.com",
+            "Accept-Encoding": "gzip, deflate",
+            "Accept": "application/json,text/html,*/*",
+            "Connection": "keep-alive",
+        },
     )
-    with urllib.request.urlopen(request, timeout=30) as response:
-        payload = response.read().decode("utf-8")
-    return json.loads(payload)
+
+    last_error = None
+    for attempt in range(2):
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                response_bytes = response.read()
+                content_encoding = (response.headers.get("Content-Encoding") or "").lower()
+
+                if "gzip" in content_encoding:
+                    payload = gzip.decompress(response_bytes).decode("utf-8")
+                else:
+                    payload = response_bytes.decode("utf-8")
+            return json.loads(payload)
+        except Exception as exc:
+            last_error = exc
+            if attempt == 0:
+                time.sleep(1.5)
+                continue
+            raise last_error
 
 
 def save_mapping_file(mapping_json):
