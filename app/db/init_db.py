@@ -98,6 +98,51 @@ def init_db():
         "CREATE INDEX IF NOT EXISTS idx_sec_filings_accepted_datetime ON sec_filings(accepted_datetime)"
     )
 
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS sec_documents (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        filing_id INTEGER,
+        ticker TEXT NOT NULL,
+        cik TEXT NOT NULL,
+        accession_number TEXT NOT NULL,
+        document_type TEXT NOT NULL,
+        document_title TEXT,
+        document_url TEXT NOT NULL,
+        raw_text TEXT,
+        clean_text TEXT,
+        content_status TEXT,
+        content_error TEXT,
+        fetched_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(cik, accession_number, document_url),
+        FOREIGN KEY(filing_id) REFERENCES sec_filings(id)
+    )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sec_documents_ticker ON sec_documents(ticker)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sec_documents_filing_id ON sec_documents(filing_id)"
+    )
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS sec_digest (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ticker TEXT NOT NULL,
+        window_hours INTEGER NOT NULL,
+        window_start TEXT,
+        window_end TEXT,
+        filing_count INTEGER DEFAULT 0,
+        document_count INTEGER DEFAULT 0,
+        summary_zh TEXT,
+        generated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(ticker, window_hours, window_end)
+    )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sec_digest_ticker_window ON sec_digest(ticker, window_hours)"
+    )
+
     cursor.execute(
         """
         INSERT INTO ticker_source_map (

@@ -18,6 +18,7 @@ def main():
 
     run_step("Fetch Google News", f"{python} app/fetchers/google_news.py")
     run_step("Fetch SEC 8-K Filings", f"{python} app/fetchers/sec_edgar.py")
+    run_step("Process SEC Documents", f"{python} app/processors/process_sec_documents.py --window-hours 24")
     run_step("Process Articles", f"{python} app/processors/process_articles.py")
     run_step(
         "Generate Company Summaries",

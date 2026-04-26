@@ -2,6 +2,7 @@ import os
 import sys
 import math
 import json
+import re
 import sqlite3
 import subprocess
 from datetime import datetime, timezone, timedelta
@@ -20,6 +21,7 @@ FETCH_SCRIPT_PATH = os.path.join(BASE_DIR, "app", "fetchers", "google_news.py")
 PROCESS_SCRIPT_PATH = os.path.join(BASE_DIR, "app", "processors", "process_articles.py")
 SUMMARIZE_SCRIPT_PATH = os.path.join(BASE_DIR, "app", "summarizers", "summarize_by_company.py")
 SEC_FETCH_SCRIPT_PATH = os.path.join(BASE_DIR, "app", "fetchers", "sec_edgar.py")
+SEC_PROCESS_SCRIPT_PATH = os.path.join(BASE_DIR, "app", "processors", "process_sec_documents.py")
 RESET_DB_PATH = os.path.join(BASE_DIR, "app", "db", "reset_news_data.py")
 SYNC_SEC_MAPPING_PATH = os.path.join(BASE_DIR, "app", "db", "sync_sec_mapping.py")
 SEC_MAPPING_CACHE_PATH = os.path.join(BASE_DIR, "data", "sec_company_tickers.json")
@@ -856,39 +858,111 @@ def ensure_sec_filings_schema(conn):
     conn.commit()
 
 
-def get_latest_sec_filing(conn, ticker, lookback_days=7):
-    recent = conn.execute(
+def ensure_sec_phase2_schema(conn):
+    cursor = conn.cursor()
+    cursor.execute(
         """
-        SELECT
-            form_type,
-            filing_date,
-            accepted_datetime,
-            item_numbers,
-            title,
-            COALESCE(NULLIF(primary_doc_url, ''), filing_detail_url) AS filing_url
-        FROM sec_filings
+        CREATE TABLE IF NOT EXISTS sec_documents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            filing_id INTEGER,
+            ticker TEXT NOT NULL,
+            cik TEXT NOT NULL,
+            accession_number TEXT NOT NULL,
+            document_type TEXT NOT NULL,
+            document_title TEXT,
+            document_url TEXT NOT NULL,
+            raw_text TEXT,
+            clean_text TEXT,
+            content_status TEXT,
+            content_error TEXT,
+            fetched_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(cik, accession_number, document_url),
+            FOREIGN KEY(filing_id) REFERENCES sec_filings(id)
+        )
+        """,
+    )
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sec_documents_ticker ON sec_documents(ticker)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sec_documents_filing_id ON sec_documents(filing_id)")
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sec_digest (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker TEXT NOT NULL,
+            window_hours INTEGER NOT NULL,
+            window_start TEXT,
+            window_end TEXT,
+            filing_count INTEGER DEFAULT 0,
+            document_count INTEGER DEFAULT 0,
+            summary_zh TEXT,
+            generated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(ticker, window_hours, window_end)
+        )
+        """,
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sec_digest_ticker_window ON sec_digest(ticker, window_hours)"
+    )
+    conn.commit()
+
+
+def get_sec_summary_and_rows(conn, ticker, window_hours):
+    accepted_expr = (
+        "CASE "
+        "WHEN length(sf.accepted_datetime)=14 THEN "
+        "substr(sf.accepted_datetime,1,4)||'-'||substr(sf.accepted_datetime,5,2)||'-'||substr(sf.accepted_datetime,7,2)||' '||"
+        "substr(sf.accepted_datetime,9,2)||':'||substr(sf.accepted_datetime,11,2)||':'||substr(sf.accepted_datetime,13,2) "
+        "ELSE sf.accepted_datetime END"
+    )
+
+    digest = conn.execute(
+        """
+        SELECT summary_zh, generated_at
+        FROM sec_digest
         WHERE ticker = ?
-          AND datetime(COALESCE(accepted_datetime, filing_date)) >= datetime('now', ?)
-        ORDER BY datetime(COALESCE(accepted_datetime, filing_date)) DESC
+          AND window_hours = ?
+        ORDER BY generated_at DESC
         LIMIT 1
         """,
-        (ticker, f"-{lookback_days} days"),
+        (ticker, window_hours),
     ).fetchone()
 
-    last_known = conn.execute(
-        """
-        SELECT filing_date
-        FROM sec_filings
-        WHERE ticker = ?
-        ORDER BY datetime(COALESCE(accepted_datetime, filing_date)) DESC
-        LIMIT 1
+    rows = conn.execute(
+        f"""
+        SELECT
+            COALESCE({accepted_expr}, sf.filing_date) AS accepted_at,
+            'SEC / 8-K' AS source,
+            COALESCE(sf.title, '8-K Filing') AS title,
+            COALESCE(NULLIF(sf.primary_doc_url, ''), sf.filing_detail_url) AS link_url
+        FROM sec_filings sf
+        WHERE sf.ticker = ?
+          AND datetime(COALESCE({accepted_expr}, sf.filing_date)) >= datetime(?)
+        UNION ALL
+        SELECT
+            COALESCE({accepted_expr}, sf.filing_date) AS accepted_at,
+            'SEC / ' || COALESCE(sd.document_type, 'EXHIBIT') AS source,
+            COALESCE(NULLIF(sd.document_title, ''), sd.document_type, 'Exhibit') AS title,
+            sd.document_url AS link_url
+        FROM sec_documents sd
+        JOIN sec_filings sf ON sf.id = sd.filing_id
+        WHERE sd.ticker = ?
+          AND datetime(COALESCE({accepted_expr}, sf.filing_date)) >= datetime(?)
+        ORDER BY datetime(accepted_at) DESC
         """,
-        (ticker,),
-    ).fetchone()
+        (ticker, cutoff_str(window_hours), ticker, cutoff_str(window_hours)),
+    ).fetchall()
+
+    summary = ""
+    generated_at = ""
+    if digest:
+        summary = (digest[0] or "").strip()
+        summary = re.sub(r"\n?\[fp:[0-9a-f]{64}\]\s*$", "", summary)
+        generated_at = digest[1] or ""
 
     return {
-        "recent": recent,
-        "last_known_date": (last_known[0] if last_known else ""),
+        "summary": summary,
+        "generated_at": generated_at,
+        "rows": rows,
     }
 
 
@@ -1161,10 +1235,11 @@ def run_python_script(script_path, args=None):
 
 def run_pipeline_with_progress():
     steps = [
-        ("Step 1/4 - Fetching news", FETCH_SCRIPT_PATH),
-        ("Step 2/4 - Fetching SEC 8-K", SEC_FETCH_SCRIPT_PATH),
-        ("Step 3/4 - Processing articles", PROCESS_SCRIPT_PATH),
-        ("Step 4/4 - Generating AI summaries", SUMMARIZE_SCRIPT_PATH, ["--window-hours", "24"]),
+        ("Step 1/5 - Fetching news", FETCH_SCRIPT_PATH),
+        ("Step 2/5 - Fetching SEC 8-K", SEC_FETCH_SCRIPT_PATH),
+        ("Step 3/5 - Processing SEC documents", SEC_PROCESS_SCRIPT_PATH, ["--window-hours", "24"]),
+        ("Step 4/5 - Processing articles", PROCESS_SCRIPT_PATH),
+        ("Step 5/5 - Generating AI summaries", SUMMARIZE_SCRIPT_PATH, ["--window-hours", "24"]),
     ]
 
     progress_placeholder = st.sidebar.empty()
@@ -1240,6 +1315,7 @@ try:
     ensure_company_digest_schema(conn)
     ensure_ticker_source_map_schema(conn)
     ensure_sec_filings_schema(conn)
+    ensure_sec_phase2_schema(conn)
 
     watchlist_rows = get_watchlist_rows(conn)
     watchlist_tickers = sorted([row["ticker"] for row in watchlist_rows])
@@ -1548,29 +1624,37 @@ try:
                     )
 
             st.markdown("**GROUND TRUTH (SEC)**")
-            sec_filing_state = get_latest_sec_filing(conn, ticker, lookback_days=7)
-            recent_filing = sec_filing_state["recent"]
+            sec_state = get_sec_summary_and_rows(conn, ticker, selected_window_hours)
 
-            if recent_filing:
-                form_type, filing_date, accepted_datetime, item_numbers, title, filing_url = recent_filing
-                lines = [
-                    f"- Form: {form_type or '8-K'}",
-                    f"- Filing date: {filing_date or 'N/A'}",
-                    f"- Accepted: {accepted_datetime or 'N/A'}",
-                ]
-                if item_numbers:
-                    lines.append(f"- Item numbers: {item_numbers}")
-                if title:
-                    lines.append(f"- Title: {title}")
-                st.markdown("\n".join(lines))
-                if filing_url:
-                    st.markdown(f"[Open Filing]({filing_url})")
+            if not sec_state["rows"]:
+                st.write("No new 8-K filing")
             else:
-                last_known = sec_filing_state["last_known_date"]
-                if last_known:
-                    st.write(f"No new 8-K filing. Last 8-K: {last_known}")
-                else:
-                    st.write("No new 8-K filing")
+                sec_summary_label = f"SEC Summary · {selected_window_hours}h"
+                if sec_state["generated_at"]:
+                    updated_label = format_digest_updated_time(sec_state["generated_at"])
+                    if updated_label:
+                        sec_summary_label = f"{sec_summary_label} · Updated: {updated_label}"
+                st.markdown(f"**{sec_summary_label}**")
+                st.markdown("中文摘要：")
+                st.markdown(sec_state["summary"] or "中性：本時段無重大實質揭露。")
+
+                sec_table_df = pd.DataFrame(
+                    [
+                        {
+                            "accepted_at": format_time(row[0]),
+                            "source": row[1] or "",
+                            "title": row[2] or "",
+                            "link": (
+                                f'<a href=\"{row[3]}\" target=\"_blank\">Open</a>'
+                                if row[3]
+                                else ""
+                            ),
+                        }
+                        for row in sec_state["rows"]
+                    ]
+                )
+                st.markdown(f"**SEC Filings ({len(sec_table_df)})**")
+                st.markdown(sec_table_df.to_html(escape=False, index=False), unsafe_allow_html=True)
 
             st.markdown('<hr class="company-divider">', unsafe_allow_html=True)
 
