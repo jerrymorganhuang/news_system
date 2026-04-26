@@ -929,25 +929,30 @@ def get_sec_summary_and_rows(conn, ticker, window_hours):
 
     rows = conn.execute(
         f"""
-        SELECT
-            COALESCE({accepted_expr}, sf.filing_date) AS accepted_at,
-            'SEC / 8-K' AS source,
-            COALESCE(sf.title, '8-K Filing') AS title,
-            COALESCE(NULLIF(sf.primary_doc_url, ''), sf.filing_detail_url) AS link_url
-        FROM sec_filings sf
-        WHERE sf.ticker = ?
-          AND datetime(COALESCE({accepted_expr}, sf.filing_date)) >= datetime(?)
-        UNION ALL
-        SELECT
-            COALESCE({accepted_expr}, sf.filing_date) AS accepted_at,
-            'SEC / ' || COALESCE(sd.document_type, 'EXHIBIT') AS source,
-            COALESCE(NULLIF(sd.document_title, ''), sd.document_type, 'Exhibit') AS title,
-            sd.document_url AS link_url
-        FROM sec_documents sd
-        JOIN sec_filings sf ON sf.id = sd.filing_id
-        WHERE sd.ticker = ?
-          AND datetime(COALESCE({accepted_expr}, sf.filing_date)) >= datetime(?)
-        ORDER BY datetime(accepted_at) DESC
+        SELECT accepted_at, source, title, link_url
+        FROM (
+            SELECT
+                COALESCE({accepted_expr}, sf.filing_date) AS accepted_at,
+                'SEC / 8-K' AS source,
+                COALESCE(sf.title, '8-K Filing') AS title,
+                COALESCE(NULLIF(sf.primary_doc_url, ''), sf.filing_detail_url) AS link_url,
+                datetime(COALESCE({accepted_expr}, sf.filing_date)) AS sort_time
+            FROM sec_filings sf
+            WHERE sf.ticker = ?
+              AND datetime(COALESCE({accepted_expr}, sf.filing_date)) >= datetime(?)
+            UNION ALL
+            SELECT
+                COALESCE({accepted_expr}, sf.filing_date) AS accepted_at,
+                'SEC / ' || COALESCE(sd.document_type, 'EXHIBIT') AS source,
+                COALESCE(NULLIF(sd.document_title, ''), sd.document_type, 'Exhibit') AS title,
+                sd.document_url AS link_url,
+                datetime(COALESCE({accepted_expr}, sf.filing_date)) AS sort_time
+            FROM sec_documents sd
+            JOIN sec_filings sf ON sf.id = sd.filing_id
+            WHERE sd.ticker = ?
+              AND datetime(COALESCE({accepted_expr}, sf.filing_date)) >= datetime(?)
+        )
+        ORDER BY sort_time DESC
         """,
         (ticker, cutoff_str(window_hours), ticker, cutoff_str(window_hours)),
     ).fetchall()
@@ -1624,37 +1629,40 @@ try:
                     )
 
             st.markdown("**GROUND TRUTH (SEC)**")
-            sec_state = get_sec_summary_and_rows(conn, ticker, selected_window_hours)
+            try:
+                sec_state = get_sec_summary_and_rows(conn, ticker, selected_window_hours)
 
-            if not sec_state["rows"]:
-                st.write("No new 8-K filing")
-            else:
-                sec_summary_label = f"SEC Summary · {selected_window_hours}h"
-                if sec_state["generated_at"]:
-                    updated_label = format_digest_updated_time(sec_state["generated_at"])
-                    if updated_label:
-                        sec_summary_label = f"{sec_summary_label} · Updated: {updated_label}"
-                st.markdown(f"**{sec_summary_label}**")
-                st.markdown("中文摘要：")
-                st.markdown(sec_state["summary"] or "中性：本時段無重大實質揭露。")
+                if not sec_state["rows"]:
+                    st.write("No new 8-K filing")
+                else:
+                    sec_summary_label = f"SEC Summary · {selected_window_hours}h"
+                    if sec_state["generated_at"]:
+                        updated_label = format_digest_updated_time(sec_state["generated_at"])
+                        if updated_label:
+                            sec_summary_label = f"{sec_summary_label} · Updated: {updated_label}"
+                    st.markdown(f"**{sec_summary_label}**")
+                    st.markdown("中文摘要：")
+                    st.markdown(sec_state["summary"] or "中性：本時段無重大實質揭露。")
 
-                sec_table_df = pd.DataFrame(
-                    [
-                        {
-                            "accepted_at": format_time(row[0]),
-                            "source": row[1] or "",
-                            "title": row[2] or "",
-                            "link": (
-                                f'<a href=\"{row[3]}\" target=\"_blank\">Open</a>'
-                                if row[3]
-                                else ""
-                            ),
-                        }
-                        for row in sec_state["rows"]
-                    ]
-                )
-                st.markdown(f"**SEC Filings ({len(sec_table_df)})**")
-                st.markdown(sec_table_df.to_html(escape=False, index=False), unsafe_allow_html=True)
+                    sec_table_df = pd.DataFrame(
+                        [
+                            {
+                                "accepted_at": format_time(row[0]),
+                                "source": row[1] or "",
+                                "title": row[2] or "",
+                                "link": (
+                                    f'<a href=\"{row[3]}\" target=\"_blank\">Open</a>'
+                                    if row[3]
+                                    else ""
+                                ),
+                            }
+                            for row in sec_state["rows"]
+                        ]
+                    )
+                    st.markdown(f"**SEC Filings ({len(sec_table_df)})**")
+                    st.markdown(sec_table_df.to_html(escape=False, index=False), unsafe_allow_html=True)
+            except sqlite3.Error as exc:
+                st.caption(f"SEC query error for {ticker}: {exc}")
 
             st.markdown('<hr class="company-divider">', unsafe_allow_html=True)
 
