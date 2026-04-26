@@ -19,6 +19,7 @@ DB_PATH = os.path.join(BASE_DIR, "data", "news.db")
 FETCH_SCRIPT_PATH = os.path.join(BASE_DIR, "app", "fetchers", "google_news.py")
 PROCESS_SCRIPT_PATH = os.path.join(BASE_DIR, "app", "processors", "process_articles.py")
 SUMMARIZE_SCRIPT_PATH = os.path.join(BASE_DIR, "app", "summarizers", "summarize_by_company.py")
+SEC_FETCH_SCRIPT_PATH = os.path.join(BASE_DIR, "app", "fetchers", "sec_edgar.py")
 RESET_DB_PATH = os.path.join(BASE_DIR, "app", "db", "reset_news_data.py")
 SYNC_SEC_MAPPING_PATH = os.path.join(BASE_DIR, "app", "db", "sync_sec_mapping.py")
 SEC_MAPPING_CACHE_PATH = os.path.join(BASE_DIR, "data", "sec_company_tickers.json")
@@ -822,6 +823,75 @@ def ensure_company_digest_schema(conn):
     conn.commit()
 
 
+def ensure_sec_filings_schema(conn):
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sec_filings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker TEXT NOT NULL,
+            cik TEXT NOT NULL,
+            accession_number TEXT NOT NULL,
+            form_type TEXT NOT NULL,
+            filing_date TEXT,
+            accepted_datetime TEXT,
+            report_date TEXT,
+            item_numbers TEXT,
+            primary_doc TEXT,
+            primary_doc_url TEXT,
+            filing_detail_url TEXT,
+            title TEXT,
+            fetched_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(cik, accession_number)
+        )
+        """
+    )
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sec_filings_ticker ON sec_filings(ticker)")
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sec_filings_filing_date ON sec_filings(filing_date)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sec_filings_accepted_datetime ON sec_filings(accepted_datetime)"
+    )
+    conn.commit()
+
+
+def get_latest_sec_filing(conn, ticker, lookback_days=7):
+    recent = conn.execute(
+        """
+        SELECT
+            form_type,
+            filing_date,
+            accepted_datetime,
+            item_numbers,
+            title,
+            COALESCE(NULLIF(primary_doc_url, ''), filing_detail_url) AS filing_url
+        FROM sec_filings
+        WHERE ticker = ?
+          AND datetime(COALESCE(accepted_datetime, filing_date)) >= datetime('now', ?)
+        ORDER BY datetime(COALESCE(accepted_datetime, filing_date)) DESC
+        LIMIT 1
+        """,
+        (ticker, f"-{lookback_days} days"),
+    ).fetchone()
+
+    last_known = conn.execute(
+        """
+        SELECT filing_date
+        FROM sec_filings
+        WHERE ticker = ?
+        ORDER BY datetime(COALESCE(accepted_datetime, filing_date)) DESC
+        LIMIT 1
+        """,
+        (ticker,),
+    ).fetchone()
+
+    return {
+        "recent": recent,
+        "last_known_date": (last_known[0] if last_known else ""),
+    }
+
+
 def get_company_digest(conn, ticker, window_hours):
     candidate_queries = [
         """
@@ -1091,9 +1161,10 @@ def run_python_script(script_path, args=None):
 
 def run_pipeline_with_progress():
     steps = [
-        ("Step 1/3 - Fetching news", FETCH_SCRIPT_PATH),
-        ("Step 2/3 - Processing articles", PROCESS_SCRIPT_PATH),
-        ("Step 3/3 - Generating AI summaries", SUMMARIZE_SCRIPT_PATH, ["--window-hours", "24"]),
+        ("Step 1/4 - Fetching news", FETCH_SCRIPT_PATH),
+        ("Step 2/4 - Fetching SEC 8-K", SEC_FETCH_SCRIPT_PATH),
+        ("Step 3/4 - Processing articles", PROCESS_SCRIPT_PATH),
+        ("Step 4/4 - Generating AI summaries", SUMMARIZE_SCRIPT_PATH, ["--window-hours", "24"]),
     ]
 
     progress_placeholder = st.sidebar.empty()
@@ -1168,6 +1239,7 @@ conn = get_connection()
 try:
     ensure_company_digest_schema(conn)
     ensure_ticker_source_map_schema(conn)
+    ensure_sec_filings_schema(conn)
 
     watchlist_rows = get_watchlist_rows(conn)
     watchlist_tickers = sorted([row["ticker"] for row in watchlist_rows])
@@ -1474,6 +1546,31 @@ try:
                         display_df.to_html(escape=False, index=False),
                         unsafe_allow_html=True
                     )
+
+            st.markdown("**GROUND TRUTH (SEC)**")
+            sec_filing_state = get_latest_sec_filing(conn, ticker, lookback_days=7)
+            recent_filing = sec_filing_state["recent"]
+
+            if recent_filing:
+                form_type, filing_date, accepted_datetime, item_numbers, title, filing_url = recent_filing
+                lines = [
+                    f"- Form: {form_type or '8-K'}",
+                    f"- Filing date: {filing_date or 'N/A'}",
+                    f"- Accepted: {accepted_datetime or 'N/A'}",
+                ]
+                if item_numbers:
+                    lines.append(f"- Item numbers: {item_numbers}")
+                if title:
+                    lines.append(f"- Title: {title}")
+                st.markdown("\n".join(lines))
+                if filing_url:
+                    st.markdown(f"[Open Filing]({filing_url})")
+            else:
+                last_known = sec_filing_state["last_known_date"]
+                if last_known:
+                    st.write(f"No new 8-K filing. Last 8-K: {last_known}")
+                else:
+                    st.write("No new 8-K filing")
 
             st.markdown('<hr class="company-divider">', unsafe_allow_html=True)
 
