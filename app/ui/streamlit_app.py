@@ -1,6 +1,7 @@
 import os
 import sys
 import math
+import json
 import sqlite3
 import subprocess
 from datetime import datetime, timezone, timedelta
@@ -19,6 +20,8 @@ FETCH_SCRIPT_PATH = os.path.join(BASE_DIR, "app", "fetchers", "google_news.py")
 PROCESS_SCRIPT_PATH = os.path.join(BASE_DIR, "app", "processors", "process_articles.py")
 SUMMARIZE_SCRIPT_PATH = os.path.join(BASE_DIR, "app", "summarizers", "summarize_by_company.py")
 RESET_DB_PATH = os.path.join(BASE_DIR, "app", "db", "reset_news_data.py")
+SYNC_SEC_MAPPING_PATH = os.path.join(BASE_DIR, "app", "db", "sync_sec_mapping.py")
+SEC_MAPPING_CACHE_PATH = os.path.join(BASE_DIR, "data", "sec_company_tickers.json")
 
 WATCHLIST_CHIPS_PER_ROW = 4
 
@@ -372,6 +375,88 @@ def normalize_ticker(ticker: str) -> str:
     return (ticker or "").strip().upper()
 
 
+def format_cik_10_digits(raw_cik):
+    if raw_cik is None:
+        return ""
+
+    cik_digits = "".join(ch for ch in str(raw_cik).strip() if ch.isdigit())
+    if not cik_digits:
+        return ""
+    return cik_digits.zfill(10)
+
+
+def load_local_sec_mapping():
+    if not os.path.exists(SEC_MAPPING_CACHE_PATH):
+        return {}
+
+    try:
+        with open(SEC_MAPPING_CACHE_PATH, "r", encoding="utf-8") as f:
+            mapping_json = json.load(f)
+    except Exception:
+        return {}
+
+    ticker_map = {}
+    if not isinstance(mapping_json, dict):
+        return ticker_map
+
+    for item in mapping_json.values():
+        if not isinstance(item, dict):
+            continue
+
+        ticker = normalize_ticker(item.get("ticker", ""))
+        if not ticker:
+            continue
+
+        ticker_map[ticker] = {
+            "sec_cik": format_cik_10_digits(item.get("cik_str")),
+            "sec_company_name": (item.get("title", "") or "").strip(),
+        }
+
+    return ticker_map
+
+
+def autofill_source_map_from_local_cache(cursor, ticker):
+    local_mapping = load_local_sec_mapping()
+    sec_match = local_mapping.get(ticker)
+    if not sec_match:
+        return False
+
+    existing = cursor.execute(
+        """
+        SELECT sec_cik, sec_company_name
+        FROM ticker_source_map
+        WHERE ticker = ?
+        LIMIT 1
+        """,
+        (ticker,),
+    ).fetchone()
+    if not existing:
+        return False
+
+    existing_sec_cik = (existing[0] or "").strip()
+    existing_sec_company_name = (existing[1] or "").strip()
+
+    next_sec_cik = existing_sec_cik or (sec_match.get("sec_cik", "") or "").strip()
+    next_sec_company_name = existing_sec_company_name or (sec_match.get("sec_company_name", "") or "").strip()
+
+    if next_sec_cik == existing_sec_cik and next_sec_company_name == existing_sec_company_name:
+        return False
+
+    cursor.execute(
+        """
+        UPDATE ticker_source_map
+        SET sec_cik = ?, sec_company_name = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE ticker = ?
+        """,
+        (
+            next_sec_cik if next_sec_cik else None,
+            next_sec_company_name if next_sec_company_name else None,
+            ticker,
+        ),
+    )
+    return True
+
+
 def safe_text(value):
     return value if value is not None else ""
 
@@ -487,6 +572,7 @@ def add_watchlist_ticker(conn, ticker):
             (ticker, ticker),
         )
 
+    autofill_source_map_from_local_cache(cursor, ticker)
     conn.commit()
 
 
@@ -1066,6 +1152,9 @@ if "pipeline_status" not in st.session_state:
 if "page_mode" not in st.session_state:
     st.session_state["page_mode"] = "Dashboard"
 
+if "sec_mapping_notice" not in st.session_state:
+    st.session_state["sec_mapping_notice"] = None
+
 
 # ========= Page =========
 if not os.path.exists(DB_PATH):
@@ -1199,7 +1288,21 @@ try:
     if page_mode == "Ticker Admin":
         st.title("Ticker Admin")
 
-        toolbar_col1, toolbar_col2, toolbar_col3, toolbar_col4 = st.columns([2.2, 0.8, 1.2, 1.3], gap="small")
+        sec_notice = st.session_state.get("sec_mapping_notice")
+        if sec_notice:
+            notice_type = sec_notice.get("type", "info")
+            notice_text = sec_notice.get("text", "")
+            if notice_type == "success":
+                st.success(notice_text)
+            elif notice_type == "error":
+                st.error(notice_text)
+            else:
+                st.info(notice_text)
+            st.session_state["sec_mapping_notice"] = None
+
+        toolbar_col1, toolbar_col2, toolbar_col3, toolbar_col4, toolbar_col5 = st.columns(
+            [2.2, 0.8, 1.2, 1.3, 1.5], gap="small"
+        )
         with toolbar_col1:
             admin_new_ticker = st.text_input(
                 "Add ticker (Ticker Admin)",
@@ -1214,6 +1317,23 @@ try:
             save_clicked = st.button("Save Changes", use_container_width=True, key="ticker_admin_save_btn")
         with toolbar_col4:
             delete_clicked = st.button("Delete Selected", use_container_width=True, key="ticker_admin_delete_selected_btn")
+        with toolbar_col5:
+            refresh_sec_mapping_clicked = st.button(
+                "Refresh SEC Mapping",
+                use_container_width=True,
+                key="ticker_admin_refresh_sec_mapping_btn",
+            )
+
+        if refresh_sec_mapping_clicked:
+            ok, msg = run_python_script(SYNC_SEC_MAPPING_PATH)
+            if ok:
+                if "no rows changed" in (msg or "").lower():
+                    st.session_state["sec_mapping_notice"] = {"type": "info", "text": msg}
+                else:
+                    st.session_state["sec_mapping_notice"] = {"type": "success", "text": msg}
+            else:
+                st.session_state["sec_mapping_notice"] = {"type": "error", "text": msg}
+            st.rerun()
 
         if admin_add_clicked:
             try:
