@@ -513,6 +513,23 @@ def build_company_header_html(ticker, price_html, day_html, after_html, week_htm
     )
 
 
+
+
+def render_news_like_table(df: pd.DataFrame) -> str:
+    if df.empty:
+        return ""
+    return df.to_html(
+        escape=False,
+        index=False,
+        table_id="news-like-table",
+        col_space={
+            "published_at": "18%",
+            "accepted_at": "18%",
+            "source": "16%",
+            "title": "56%",
+            "link": "10%",
+        },
+    )
 # ========= Watchlist =========
 def get_watchlist_rows(conn):
     query = """
@@ -1624,7 +1641,7 @@ try:
                     display_df = display_df[["published_at", "source", "title", "link"]]
 
                     st.markdown(
-                        display_df.to_html(escape=False, index=False),
+                        render_news_like_table(display_df),
                         unsafe_allow_html=True
                     )
 
@@ -1668,7 +1685,7 @@ try:
                         ]
                     )
                     with st.expander(f"SEC Filings ({len(sec_table_df)})", expanded=False):
-                        st.markdown(sec_table_df.to_html(escape=False, index=False), unsafe_allow_html=True)
+                        st.markdown(render_news_like_table(sec_table_df), unsafe_allow_html=True)
             except sqlite3.Error as exc:
                 st.caption(f"SEC query error for {ticker}: {exc}")
 
