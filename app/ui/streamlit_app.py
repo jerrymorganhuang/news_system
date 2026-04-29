@@ -1641,33 +1641,33 @@ try:
                     unsafe_allow_html=True
                 )
 
-                if not sec_state["rows"]:
+                if sec_state["summary"]:
                     st.markdown(
-                        '<div class="summary-text">No new 8-K filing</div>',
+                        f'<div class="summary-text">{sec_state["summary"]}</div>',
                         unsafe_allow_html=True
                     )
                 else:
-                    st.markdown(
-                        f'<div class="summary-text">{sec_state["summary"] or "中性：本時段無重大實質揭露。"}</div>',
-                        unsafe_allow_html=True
-                    )
+                    st.write("")
 
-                    sec_table_df = pd.DataFrame(
-                        [
-                            {
-                                "accepted_at": format_time(row[0]),
-                                "source": row[1] or "",
-                                "title": row[2] or "",
-                                "link": (
-                                    f'<a href=\"{row[3]}\" target=\"_blank\">Open</a>'
-                                    if row[3]
-                                    else ""
-                                ),
-                            }
-                            for row in sec_state["rows"]
-                        ]
-                    )
-                    with st.expander(f"SEC Filings ({len(sec_table_df)})", expanded=False):
+                sec_table_df = pd.DataFrame(
+                    [
+                        {
+                            "accepted_at": format_time(row[0]),
+                            "source": row[1] or "",
+                            "title": row[2] or "",
+                            "link": (
+                                f'<a href=\"{row[3]}\" target=\"_blank\">Open</a>'
+                                if row[3]
+                                else ""
+                            ),
+                        }
+                        for row in sec_state["rows"]
+                    ]
+                )
+                with st.expander(f"SEC Filings ({len(sec_table_df)})", expanded=False):
+                    if sec_table_df.empty:
+                        st.write("")
+                    else:
                         st.markdown(sec_table_df.to_html(escape=False, index=False), unsafe_allow_html=True)
             except sqlite3.Error as exc:
                 st.caption(f"SEC query error for {ticker}: {exc}")
