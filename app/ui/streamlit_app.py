@@ -956,32 +956,17 @@ def get_sec_summary_and_rows(conn, ticker, window_hours):
 
     rows = conn.execute(
         f"""
-        SELECT accepted_at, source, title, link_url
-        FROM (
-            SELECT
-                COALESCE({accepted_expr}, sf.filing_date) AS accepted_at,
-                'SEC / 8-K' AS source,
-                COALESCE(sf.title, '8-K Filing') AS title,
-                COALESCE(NULLIF(sf.primary_doc_url, ''), sf.filing_detail_url) AS link_url,
-                datetime(COALESCE({accepted_expr}, sf.filing_date)) AS sort_time
-            FROM sec_filings sf
-            WHERE sf.ticker = ?
-              AND datetime(COALESCE({accepted_expr}, sf.filing_date)) >= datetime(?)
-            UNION ALL
-            SELECT
-                COALESCE({accepted_expr}, sf.filing_date) AS accepted_at,
-                'SEC / ' || COALESCE(sd.document_type, 'EXHIBIT') AS source,
-                COALESCE(NULLIF(sd.document_title, ''), sd.document_type, 'Exhibit') AS title,
-                sd.document_url AS link_url,
-                datetime(COALESCE({accepted_expr}, sf.filing_date)) AS sort_time
-            FROM sec_documents sd
-            JOIN sec_filings sf ON sf.id = sd.filing_id
-            WHERE sd.ticker = ?
-              AND datetime(COALESCE({accepted_expr}, sf.filing_date)) >= datetime(?)
-        )
-        ORDER BY sort_time DESC
+        SELECT
+            COALESCE({accepted_expr}, sf.filing_date) AS accepted_at,
+            'SEC / 8-K' AS source,
+            COALESCE(sf.title, '8-K Filing') AS title,
+            COALESCE(NULLIF(sf.primary_doc_url, ''), sf.filing_detail_url) AS link_url
+        FROM sec_filings sf
+        WHERE sf.ticker = ?
+          AND datetime(COALESCE({accepted_expr}, sf.filing_date)) >= datetime(?)
+        ORDER BY datetime(COALESCE({accepted_expr}, sf.filing_date)) DESC
         """,
-        (ticker, cutoff_str(window_hours), ticker, cutoff_str(window_hours)),
+        (ticker, cutoff_str(window_hours)),
     ).fetchall()
 
     summary = ""
