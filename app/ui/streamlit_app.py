@@ -518,17 +518,27 @@ def build_company_header_html(ticker, price_html, day_html, after_html, week_htm
 def render_news_like_table(df: pd.DataFrame) -> str:
     if df.empty:
         return ""
+    if "published_at" in df.columns:
+        time_col = "published_at"
+    elif "accepted_at" in df.columns:
+        time_col = "accepted_at"
+    else:
+        time_col = None
+
+    col_space = {
+        "source": "16%",
+        "title": "56%",
+        "link": "10%",
+    }
+    if time_col:
+        col_space[time_col] = "18%"
+    col_space = {col: width for col, width in col_space.items() if col in df.columns}
+
     return df.to_html(
         escape=False,
         index=False,
         table_id="news-like-table",
-        col_space={
-            "published_at": "18%",
-            "accepted_at": "18%",
-            "source": "16%",
-            "title": "56%",
-            "link": "10%",
-        },
+        col_space=col_space,
     )
 # ========= Watchlist =========
 def get_watchlist_rows(conn):
