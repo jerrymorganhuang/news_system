@@ -1698,9 +1698,6 @@ try:
                             for row in sec_state["rows"]
                         ]
                     )
-                    with st.expander(f"SEC Filings ({len(sec_table_df)})", expanded=False):
-                        st.markdown(render_news_like_table(sec_table_df), unsafe_allow_html=True)
-
                     sec_docs_df = pd.DataFrame(
                         [
                             {
@@ -1715,8 +1712,17 @@ try:
                             for drow in sec_state["document_rows"]
                         ]
                     )
-                    with st.expander(f"SEC Documents ({len(sec_docs_df)})", expanded=False):
-                        st.markdown(render_news_like_table(sec_docs_df), unsafe_allow_html=True)
+
+                    sec_filings_label = f"SEC Filings ({len(sec_table_df)})"
+                    if not sec_docs_df.empty:
+                        sec_filings_label = f"{sec_filings_label} · SEC Documents ({len(sec_docs_df)})"
+
+                    with st.expander(sec_filings_label, expanded=False):
+                        st.markdown(render_news_like_table(sec_table_df), unsafe_allow_html=True)
+
+                        if not sec_docs_df.empty:
+                            st.markdown('<div class="summary-label">SEC Documents</div>', unsafe_allow_html=True)
+                            st.markdown(render_news_like_table(sec_docs_df), unsafe_allow_html=True)
             except sqlite3.Error as exc:
                 st.caption(f"SEC query error for {ticker}: {exc}")
 
