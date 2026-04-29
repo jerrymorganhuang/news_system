@@ -26,6 +26,7 @@ SEC_USER_AGENT = os.getenv(
 MODEL = "gpt-5-mini"
 SUPPORTED_WINDOWS = {24, 48}
 MAX_EXCERPT_CHARS = 1200
+MAX_DOCS_PER_FILING = 3
 
 EXHIBIT_RULES = [
     ("EX-99.1", re.compile(r"\b(?:EX\s*[-.]?\s*)?99\s*[-.]?\s*0?1\b", re.IGNORECASE)),
@@ -541,6 +542,31 @@ def get_latest_digest(conn: sqlite3.Connection, ticker: str, window_hours: int) 
     ).fetchone()
 
 
+
+
+def rank_document_for_digest(doc: sqlite3.Row) -> tuple:
+    document_type = (doc[1] or '').upper()
+    title = (doc[2] or '').lower()
+    url = (doc[3] or '').lower()
+    clean_text = (doc[4] or '').strip()
+
+    if document_type == 'EX-99.1':
+        priority = 0
+    elif document_type == 'EX-99.2':
+        priority = 1
+    elif '8-k' in document_type or '8k' in document_type or '8-k' in title or '8-k' in url:
+        priority = 2
+    else:
+        priority = 3
+
+    has_text = 0 if clean_text else 1
+    return (priority, has_text, -len(clean_text))
+
+
+def select_documents_for_filing(documents: List[sqlite3.Row]) -> List[sqlite3.Row]:
+    ranked = sorted(documents, key=rank_document_for_digest)
+    return ranked[:MAX_DOCS_PER_FILING]
+
 def build_digest_prompt(ticker: str, window_hours: int, filings: List[sqlite3.Row], documents: List[sqlite3.Row]) -> str:
     doc_by_filing: Dict[int, List[sqlite3.Row]] = {}
     for doc in documents:
@@ -556,7 +582,8 @@ def build_digest_prompt(ticker: str, window_hours: int, filings: List[sqlite3.Ro
             f"item_numbers: {item_numbers or 'N/A'}",
             f"title: {title or 'N/A'}",
         ]
-        for doc in doc_by_filing.get(filing_id, []):
+        selected_docs = select_documents_for_filing(doc_by_filing.get(filing_id, []))
+        for doc in selected_docs:
             excerpt = (doc[4] or "").strip()
             if excerpt:
                 excerpt = excerpt[:MAX_EXCERPT_CHARS]
@@ -584,6 +611,7 @@ def build_digest_prompt(ticker: str, window_hours: int, filings: List[sqlite3.Ro
 - 語氣客觀，不可推測，不可排名。
 - 聚焦：公司最近正式揭露事項、關鍵數字、指引調整、合約/M&A/融資/產品進展、管理層變動與風險。
 - 若沒有實質內容，明確寫出「無重大實質揭露」。
+- 若有 EX-99.1 / EX-99.2，優先使用其 clean_text_excerpt 中的財務數字（營收、EPS、YoY、指引）作摘要依據，不可忽略。
 
 SEC filing data:
 {filings_text}
