@@ -28,6 +28,8 @@ MODEL = "gpt-5-mini"
 SUPPORTED_WINDOWS = {24, 48}
 MAX_EXCERPT_CHARS = 1200
 MAX_DOCS_PER_FILING = 3
+EX99_FALLBACK_CHARS = 9000
+EX99_PAGE_LIMIT = 2
 
 EXHIBIT_RULES = [
     ("EX-99.1", re.compile(r"\b(?:EX\s*[-.]?\s*)?99\s*[-.]?\s*0?1\b", re.IGNORECASE)),
@@ -618,6 +620,68 @@ def get_latest_digest(conn: sqlite3.Connection, ticker: str, window_hours: int) 
 
 
 
+
+
+def extract_first_meaningful_ex99_part(clean_text: str) -> str:
+    text = (clean_text or "").strip()
+    if not text:
+        return ""
+
+    pages = [p.strip() for p in re.split(r"\f+", text) if p.strip()]
+    if len(pages) >= EX99_PAGE_LIMIT:
+        return "\n\n".join(pages[:EX99_PAGE_LIMIT]).strip()
+
+    marker_matches = list(re.finditer(r"(?im)^\s*(?:page|pg\.?)\s*\d+\s*(?:of\s*\d+)?\s*$", text))
+    if marker_matches:
+        cuts = [m.start() for m in marker_matches]
+        if len(cuts) > EX99_PAGE_LIMIT:
+            return text[: cuts[EX99_PAGE_LIMIT]].strip()
+
+    return text[:EX99_FALLBACK_CHARS].strip()
+
+
+def select_documents_for_summary(documents: List[sqlite3.Row]) -> List[Dict[str, str]]:
+    primary_8k = None
+    ex99_1 = None
+    ex99_2 = None
+
+    for doc in documents:
+        doc_type = (doc[1] or "").upper()
+        clean_text = (doc[4] or "").strip()
+        if primary_8k is None and doc_type == "8-K":
+            primary_8k = doc
+        if ex99_1 is None and doc_type == "EX-99.1":
+            ex99_1 = doc
+        if ex99_2 is None and doc_type == "EX-99.2":
+            ex99_2 = doc
+
+    selected: List[Dict[str, str]] = []
+
+    if primary_8k is not None:
+        selected.append({
+            "document_type": primary_8k[1],
+            "document_title": primary_8k[2] or "N/A",
+            "content_status": primary_8k[5] or "N/A",
+            "clean_text_excerpt": (primary_8k[4] or "").strip() or "[No text extracted]",
+        })
+
+    ex99_source = None
+    if ex99_1 is not None and (ex99_1[4] or "").strip():
+        ex99_source = ex99_1
+    elif ex99_2 is not None and (ex99_2[4] or "").strip():
+        ex99_source = ex99_2
+
+    if ex99_source is not None:
+        excerpt = extract_first_meaningful_ex99_part(ex99_source[4] or "")
+        selected.append({
+            "document_type": ex99_source[1],
+            "document_title": ex99_source[2] or "N/A",
+            "content_status": ex99_source[5] or "N/A",
+            "clean_text_excerpt": excerpt or "[No text extracted]",
+        })
+
+    return selected
+
 def rank_document_for_digest(doc: sqlite3.Row) -> tuple:
     document_type = (doc[1] or '').upper()
     title = (doc[2] or '').lower()
@@ -656,19 +720,14 @@ def build_digest_prompt(ticker: str, window_hours: int, filings: List[sqlite3.Ro
             f"item_numbers: {item_numbers or 'N/A'}",
             f"title: {title or 'N/A'}",
         ]
-        selected_docs = select_documents_for_filing(doc_by_filing.get(filing_id, []))
+        selected_docs = select_documents_for_summary(doc_by_filing.get(filing_id, []))
         for doc in selected_docs:
-            excerpt = (doc[4] or "").strip()
-            if excerpt:
-                excerpt = excerpt[:MAX_EXCERPT_CHARS]
-            else:
-                excerpt = "[No text extracted]"
             lines.extend(
                 [
-                    f"document_type: {doc[1]}",
-                    f"document_title: {doc[2] or 'N/A'}",
-                    f"content_status: {doc[5] or 'N/A'}",
-                    f"clean_text_excerpt:\n{excerpt}",
+                    f"document_type: {doc['document_type']}",
+                    f"document_title: {doc['document_title']}",
+                    f"content_status: {doc['content_status']}",
+                    f"clean_text_excerpt:\n{doc['clean_text_excerpt']}",
                 ]
             )
         filing_blocks.append("\n".join(lines))
@@ -685,7 +744,7 @@ def build_digest_prompt(ticker: str, window_hours: int, filings: List[sqlite3.Ro
 - 語氣客觀，不可推測，不可排名。
 - 聚焦：公司最近正式揭露事項、關鍵數字、指引調整、合約/M&A/融資/產品進展、管理層變動與風險。
 - 若沒有實質內容，明確寫出「無重大實質揭露」。
-- 若有 EX-99.1 / EX-99.2，優先使用其 clean_text_excerpt 中的財務數字（營收、EPS、YoY、指引）作摘要依據，不可忽略。
+- 若有 EX-99.1，優先使用其 clean_text_excerpt 中的財務數字（營收、EPS、YoY、指引）作摘要依據，不可忽略。
 
 SEC filing data:
 {filings_text}
