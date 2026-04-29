@@ -643,17 +643,14 @@ def extract_first_meaningful_ex99_part(clean_text: str) -> str:
 def select_documents_for_summary(documents: List[sqlite3.Row]) -> List[Dict[str, str]]:
     primary_8k = None
     ex99_1 = None
-    ex99_2 = None
 
     for doc in documents:
-        doc_type = (doc[1] or "").upper()
-        clean_text = (doc[4] or "").strip()
+        doc_type = (doc[1] or "").upper().strip()
         if primary_8k is None and doc_type == "8-K":
             primary_8k = doc
-        if ex99_1 is None and doc_type == "EX-99.1":
+        normalized_exhibit_type = detect_exhibit_type(doc_type, doc[2] or "", doc[3] or "")
+        if ex99_1 is None and normalized_exhibit_type == "EX-99.1":
             ex99_1 = doc
-        if ex99_2 is None and doc_type == "EX-99.2":
-            ex99_2 = doc
 
     selected: List[Dict[str, str]] = []
 
@@ -665,18 +662,12 @@ def select_documents_for_summary(documents: List[sqlite3.Row]) -> List[Dict[str,
             "clean_text_excerpt": (primary_8k[4] or "").strip() or "[No text extracted]",
         })
 
-    ex99_source = None
     if ex99_1 is not None and (ex99_1[4] or "").strip():
-        ex99_source = ex99_1
-    elif ex99_2 is not None and (ex99_2[4] or "").strip():
-        ex99_source = ex99_2
-
-    if ex99_source is not None:
-        excerpt = extract_first_meaningful_ex99_part(ex99_source[4] or "")
+        excerpt = extract_first_meaningful_ex99_part(ex99_1[4] or "")
         selected.append({
-            "document_type": ex99_source[1],
-            "document_title": ex99_source[2] or "N/A",
-            "content_status": ex99_source[5] or "N/A",
+            "document_type": ex99_1[1],
+            "document_title": ex99_1[2] or "N/A",
+            "content_status": ex99_1[5] or "N/A",
             "clean_text_excerpt": excerpt or "[No text extracted]",
         })
 

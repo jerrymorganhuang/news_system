@@ -969,6 +969,24 @@ def get_sec_summary_and_rows(conn, ticker, window_hours):
         (ticker, cutoff_str(window_hours)),
     ).fetchall()
 
+    document_rows = conn.execute(
+        f"""
+        SELECT
+            sd.document_type,
+            COALESCE(NULLIF(sd.document_title, ''), sd.document_url) AS document_title,
+            sd.document_url
+        FROM sec_documents sd
+        JOIN sec_filings sf ON sf.id = sd.filing_id
+        WHERE sd.ticker = ?
+          AND datetime(COALESCE({accepted_expr}, sf.filing_date)) >= datetime(?)
+        ORDER BY
+            datetime(COALESCE({accepted_expr}, sf.filing_date)) DESC,
+            CASE sd.document_type WHEN 'EX-99.1' THEN 0 WHEN 'EX-99.2' THEN 1 WHEN '8-K' THEN 2 ELSE 9 END,
+            sd.id DESC
+        """,
+        (ticker, cutoff_str(window_hours)),
+    ).fetchall()
+
     summary = ""
     generated_at = ""
     if digest:
@@ -980,6 +998,7 @@ def get_sec_summary_and_rows(conn, ticker, window_hours):
         "summary": summary,
         "generated_at": generated_at,
         "rows": rows,
+        "document_rows": document_rows,
     }
 
 
@@ -1681,6 +1700,23 @@ try:
                     )
                     with st.expander(f"SEC Filings ({len(sec_table_df)})", expanded=False):
                         st.markdown(render_news_like_table(sec_table_df), unsafe_allow_html=True)
+
+                    sec_docs_df = pd.DataFrame(
+                        [
+                            {
+                                "type": drow[0] or "",
+                                "title": drow[1] or "",
+                                "link": (
+                                    f'<a href=\"{drow[2]}\" target=\"_blank\">Open</a>'
+                                    if drow[2]
+                                    else ""
+                                ),
+                            }
+                            for drow in sec_state["document_rows"]
+                        ]
+                    )
+                    with st.expander(f"SEC Documents ({len(sec_docs_df)})", expanded=False):
+                        st.markdown(render_news_like_table(sec_docs_df), unsafe_allow_html=True)
             except sqlite3.Error as exc:
                 st.caption(f"SEC query error for {ticker}: {exc}")
 
