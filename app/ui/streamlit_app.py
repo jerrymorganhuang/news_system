@@ -1631,20 +1631,26 @@ try:
             try:
                 sec_state = get_sec_summary_and_rows(conn, ticker, selected_window_hours)
 
+                sec_summary_label = f"SEC 8-K Summary · {selected_window_hours}h"
+                if sec_state["generated_at"]:
+                    updated_label = format_digest_updated_time(sec_state["generated_at"])
+                    if updated_label:
+                        sec_summary_label = f"{sec_summary_label} · Updated: {updated_label}"
+                st.markdown(
+                    f'<div class="summary-label">{sec_summary_label}</div>',
+                    unsafe_allow_html=True
+                )
+
                 if not sec_state["rows"]:
-                    st.write("No new 8-K filing")
-                else:
-                    sec_summary_label = f"SEC 8-K Summary · {selected_window_hours}h"
-                    if sec_state["generated_at"]:
-                        updated_label = format_digest_updated_time(sec_state["generated_at"])
-                        if updated_label:
-                            sec_summary_label = f"{sec_summary_label} · Updated: {updated_label}"
                     st.markdown(
-                        f'<div class="summary-label">{sec_summary_label}</div>',
+                        '<div class="summary-text">No new 8-K filing</div>',
                         unsafe_allow_html=True
                     )
-                    st.markdown("中文摘要：")
-                    st.markdown(sec_state["summary"] or "中性：本時段無重大實質揭露。")
+                else:
+                    st.markdown(
+                        f'<div class="summary-text">{sec_state["summary"] or "中性：本時段無重大實質揭露。"}</div>',
+                        unsafe_allow_html=True
+                    )
 
                     sec_table_df = pd.DataFrame(
                         [
