@@ -1393,14 +1393,14 @@ try:
         st.rerun()
 
     confirm_reset = st.sidebar.checkbox(
-        "I understand this will clear all news data",
+        "I understand this will clear generated News and SEC data, while preserving Watchlist and Source Mapping.",
         value=False,
         key="confirm_reset_database"
     )
 
     if reset_clicked:
         if not confirm_reset:
-            st.sidebar.warning("Please confirm reset first.")
+            st.sidebar.warning("Please confirm reset of generated News/SEC data first.")
         else:
             ok, msg = run_python_script(RESET_DB_PATH)
             st.session_state["pipeline_log"] = msg
@@ -1409,7 +1409,7 @@ try:
             if ok:
                 st.rerun()
             else:
-                st.sidebar.error("Database reset failed.")
+                st.sidebar.error("Generated News/SEC data reset failed.")
 
     st.sidebar.divider()
 
