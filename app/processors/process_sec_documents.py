@@ -4,6 +4,7 @@ import os
 import re
 import sqlite3
 import urllib.request
+from urllib.parse import urljoin
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -32,6 +33,14 @@ EXHIBIT_RULES = [
     ("EX-99.1", re.compile(r"\b(?:EX\s*[-.]?\s*)?99\s*[-.]?\s*0?1\b", re.IGNORECASE)),
     ("EX-99.2", re.compile(r"\b(?:EX\s*[-.]?\s*)?99\s*[-.]?\s*0?2\b", re.IGNORECASE)),
 ]
+EXHIBIT_URL_HINTS = {
+    "EX-99.1": re.compile(r"(?:ex(?:hibit)?[\W_]*99[\W_]*0?1|99[\W_]*0?1)", re.IGNORECASE),
+    "EX-99.2": re.compile(r"(?:ex(?:hibit)?[\W_]*99[\W_]*0?2|99[\W_]*0?2)", re.IGNORECASE),
+}
+EXHIBIT_NEARBY_HINTS = {
+    "EX-99.1": re.compile(r"(earnings|press\s+release)", re.IGNORECASE),
+    "EX-99.2": re.compile(r"(financial\s+information|segment\s+recast)", re.IGNORECASE),
+}
 
 BOILERPLATE_PATTERNS = [
     re.compile(r"^\s*UNITED\s+STATES\s+SECURITIES\s+AND\s+EXCHANGE\s+COMMISSION\s*$", re.IGNORECASE),
@@ -184,13 +193,25 @@ def absolutize_sec_url(link: str, detail_url: str) -> str:
         return link
     if link.startswith("/"):
         return f"https://www.sec.gov{link}"
-    if detail_url.endswith("/"):
-        return detail_url + link
-    return detail_url.rsplit("/", 1)[0] + "/" + link
+    return urljoin(detail_url, link)
 
 
-def extract_exhibit_links(filing_detail_url: str) -> List[Dict[str, str]]:
-    html = fetch_url_text(filing_detail_url)
+def detect_exhibit_from_link(anchor_text: str, href: str, nearby_text: str = "") -> Optional[str]:
+    by_text = detect_exhibit_type(anchor_text, nearby_text)
+    if by_text:
+        return by_text
+    target = f"{href} {anchor_text} {nearby_text}".lower()
+    for exhibit_type, pattern in EXHIBIT_URL_HINTS.items():
+        if pattern.search(target):
+            return exhibit_type
+    for exhibit_type, pattern in EXHIBIT_NEARBY_HINTS.items():
+        if pattern.search(nearby_text):
+            return exhibit_type
+    return None
+
+
+def extract_exhibit_links(source_url: str) -> List[Dict[str, str]]:
+    html = fetch_url_text(source_url)
     soup = BeautifulSoup(html, "html.parser")
 
     found: List[Dict[str, str]] = []
@@ -210,7 +231,7 @@ def extract_exhibit_links(filing_detail_url: str) -> List[Dict[str, str]]:
         if not link_tag:
             continue
 
-        doc_url = absolutize_sec_url(link_tag.get("href", ""), filing_detail_url)
+        doc_url = absolutize_sec_url(link_tag.get("href", ""), source_url)
         if not doc_url or doc_url in seen:
             continue
         seen.add(doc_url)
@@ -230,7 +251,40 @@ def extract_exhibit_links(filing_detail_url: str) -> List[Dict[str, str]]:
             }
         )
 
-    found.sort(key=lambda row: 0 if row["document_type"] == "EX-99.1" else 1)
+    for anchor in soup.find_all("a", href=True):
+        href = anchor.get("href", "")
+        anchor_text = anchor.get_text(" ", strip=True)
+        if not href:
+            continue
+
+        container_text = ""
+        if anchor.parent:
+            container_text = anchor.parent.get_text(" ", strip=True)
+        nearby_text = f"{anchor_text} {container_text}".strip()
+        exhibit_type = detect_exhibit_from_link(anchor_text, href, nearby_text)
+        if not exhibit_type:
+            continue
+
+        doc_url = absolutize_sec_url(href, source_url)
+        if not doc_url or doc_url in seen:
+            continue
+        seen.add(doc_url)
+
+        title = anchor_text or container_text or exhibit_type
+        found.append(
+            {
+                "document_type": exhibit_type,
+                "document_title": title,
+                "document_url": doc_url,
+            }
+        )
+
+    found.sort(
+        key=lambda row: (
+            0 if row["document_type"] == "EX-99.1" else 1 if row["document_type"] == "EX-99.2" else 9,
+            row["document_url"],
+        )
+    )
     return found
 
 
@@ -402,7 +456,7 @@ def get_recent_filings(conn: sqlite3.Connection, window_hours: int) -> List[sqli
     cursor = conn.cursor()
     cursor.execute(
         """
-        SELECT id, ticker, cik, accession_number, accepted_datetime, filing_date, item_numbers, title, filing_detail_url
+        SELECT id, ticker, cik, accession_number, accepted_datetime, filing_date, item_numbers, title, filing_detail_url, primary_doc_url
         FROM sec_filings
         ORDER BY datetime(COALESCE(filing_date, accepted_datetime)) DESC
         """
@@ -429,19 +483,39 @@ def process_documents(conn: sqlite3.Connection, filings: List[sqlite3.Row]) -> N
             "item_numbers": filing[6],
             "title": filing[7],
             "filing_detail_url": filing[8],
+            "primary_doc_url": filing[9],
         }
-        if not filing_dict["filing_detail_url"]:
+        if not filing_dict["filing_detail_url"] and not filing_dict["primary_doc_url"]:
             continue
+        primary_url = filing_dict["primary_doc_url"] or filing_dict["filing_detail_url"]
+        upsert_sec_document(
+            conn,
+            filing_dict,
+            {
+                "document_type": "8-K",
+                "document_title": filing_dict["title"] or "Primary 8-K",
+                "document_url": primary_url,
+            },
+        )
 
-        try:
-            exhibits = extract_exhibit_links(filing_dict["filing_detail_url"])
-        except Exception as exc:
-            print(
-                f"[SEC DOC] ticker={filing_dict['ticker']} accession={filing_dict['accession_number']} detect_error={exc}"
-            )
-            continue
+        exhibit_sources = [u for u in [filing_dict["primary_doc_url"], filing_dict["filing_detail_url"]] if u]
+        seen_sources = set()
+        exhibits: List[Dict[str, str]] = []
+        for source_url in exhibit_sources:
+            if source_url in seen_sources:
+                continue
+            seen_sources.add(source_url)
+            try:
+                exhibits.extend(extract_exhibit_links(source_url))
+            except Exception as exc:
+                print(
+                    f"[SEC DOC] ticker={filing_dict['ticker']} accession={filing_dict['accession_number']} detect_error source={source_url} err={exc}"
+                )
 
+        deduped = {}
         for exhibit in exhibits:
+            deduped[exhibit["document_url"]] = exhibit
+        for exhibit in deduped.values():
             upsert_sec_document(conn, filing_dict, exhibit)
 
     conn.commit()
