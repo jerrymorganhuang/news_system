@@ -1628,19 +1628,21 @@ try:
                         unsafe_allow_html=True
                     )
 
-            st.markdown("**GROUND TRUTH (SEC)**")
             try:
                 sec_state = get_sec_summary_and_rows(conn, ticker, selected_window_hours)
 
                 if not sec_state["rows"]:
                     st.write("No new 8-K filing")
                 else:
-                    sec_summary_label = f"SEC Summary · {selected_window_hours}h"
+                    sec_summary_label = f"SEC 8-K Summary · {selected_window_hours}h"
                     if sec_state["generated_at"]:
                         updated_label = format_digest_updated_time(sec_state["generated_at"])
                         if updated_label:
                             sec_summary_label = f"{sec_summary_label} · Updated: {updated_label}"
-                    st.markdown(f"**{sec_summary_label}**")
+                    st.markdown(
+                        f'<div class="summary-label">{sec_summary_label}</div>',
+                        unsafe_allow_html=True
+                    )
                     st.markdown("中文摘要：")
                     st.markdown(sec_state["summary"] or "中性：本時段無重大實質揭露。")
 
@@ -1659,8 +1661,8 @@ try:
                             for row in sec_state["rows"]
                         ]
                     )
-                    st.markdown(f"**SEC Filings ({len(sec_table_df)})**")
-                    st.markdown(sec_table_df.to_html(escape=False, index=False), unsafe_allow_html=True)
+                    with st.expander(f"SEC Filings ({len(sec_table_df)})", expanded=False):
+                        st.markdown(sec_table_df.to_html(escape=False, index=False), unsafe_allow_html=True)
             except sqlite3.Error as exc:
                 st.caption(f"SEC query error for {ticker}: {exc}")
 
