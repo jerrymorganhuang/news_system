@@ -35,14 +35,6 @@ EXHIBIT_RULES = [
     ("EX-99.1", re.compile(r"\b(?:EX\s*[-.]?\s*)?99\s*[-.]?\s*0?1\b", re.IGNORECASE)),
     ("EX-99.2", re.compile(r"\b(?:EX\s*[-.]?\s*)?99\s*[-.]?\s*0?2\b", re.IGNORECASE)),
 ]
-EXHIBIT_URL_HINTS = {
-    "EX-99.1": re.compile(r"(?:ex(?:hibit)?[\W_]*99[\W_]*0?1|99[\W_]*0?1)", re.IGNORECASE),
-    "EX-99.2": re.compile(r"(?:ex(?:hibit)?[\W_]*99[\W_]*0?2|99[\W_]*0?2)", re.IGNORECASE),
-}
-EXHIBIT_NEARBY_HINTS = {
-    "EX-99.1": re.compile(r"(earnings|press\s+release)", re.IGNORECASE),
-    "EX-99.2": re.compile(r"(financial\s+information|segment\s+recast)", re.IGNORECASE),
-}
 
 BOILERPLATE_PATTERNS = [
     re.compile(r"^\s*UNITED\s+STATES\s+SECURITIES\s+AND\s+EXCHANGE\s+COMMISSION\s*$", re.IGNORECASE),
@@ -198,18 +190,13 @@ def absolutize_sec_url(link: str, detail_url: str) -> str:
     return urljoin(detail_url, link)
 
 
-def detect_exhibit_from_link(anchor_text: str, href: str, nearby_text: str = "") -> Optional[str]:
-    by_text = detect_exhibit_type(anchor_text, nearby_text)
-    if by_text:
-        return by_text
-    target = f"{href} {anchor_text} {nearby_text}".lower()
-    for exhibit_type, pattern in EXHIBIT_URL_HINTS.items():
-        if pattern.search(target):
-            return exhibit_type
-    for exhibit_type, pattern in EXHIBIT_NEARBY_HINTS.items():
-        if pattern.search(nearby_text):
-            return exhibit_type
-    return None
+def is_valid_sec_archive_document_url(url: str) -> bool:
+    lowered = (url or "").strip().lower()
+    if not lowered:
+        return False
+    if "/archives/edgar/data/" not in lowered:
+        return False
+    return True
 
 
 def extract_exhibit_links(source_url: str) -> List[Dict[str, str]]:
@@ -234,7 +221,7 @@ def extract_exhibit_links(source_url: str) -> List[Dict[str, str]]:
             continue
 
         doc_url = absolutize_sec_url(link_tag.get("href", ""), source_url)
-        if not doc_url or doc_url in seen:
+        if not doc_url or not is_valid_sec_archive_document_url(doc_url) or doc_url in seen:
             continue
         seen.add(doc_url)
 
@@ -249,34 +236,6 @@ def extract_exhibit_links(source_url: str) -> List[Dict[str, str]]:
             {
                 "document_type": exhibit_type,
                 "document_title": doc_title,
-                "document_url": doc_url,
-            }
-        )
-
-    for anchor in soup.find_all("a", href=True):
-        href = anchor.get("href", "")
-        anchor_text = anchor.get_text(" ", strip=True)
-        if not href:
-            continue
-
-        container_text = ""
-        if anchor.parent:
-            container_text = anchor.parent.get_text(" ", strip=True)
-        nearby_text = f"{anchor_text} {container_text}".strip()
-        exhibit_type = detect_exhibit_from_link(anchor_text, href, nearby_text)
-        if not exhibit_type:
-            continue
-
-        doc_url = absolutize_sec_url(href, source_url)
-        if not doc_url or doc_url in seen:
-            continue
-        seen.add(doc_url)
-
-        title = anchor_text or container_text or exhibit_type
-        found.append(
-            {
-                "document_type": exhibit_type,
-                "document_title": title,
                 "document_url": doc_url,
             }
         )
