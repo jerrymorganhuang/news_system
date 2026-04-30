@@ -70,6 +70,15 @@ def accession_without_dashes(accession_number):
     return (accession_number or "").replace("-", "").strip()
 
 
+def build_filing_detail_url(cik_10, accession_number):
+    cik_archive = cik_for_archive_path(cik_10)
+    accession_clean = accession_without_dashes(accession_number)
+    return (
+        f"https://www.sec.gov/Archives/edgar/data/{cik_archive}/{accession_clean}/"
+        f"{accession_number}-index.htm"
+    )
+
+
 def parse_filing_date(filing_date_str):
     if not filing_date_str:
         return None
@@ -109,11 +118,10 @@ def fetch_company_submissions(cik_10):
 
 
 def build_urls(cik_10, accession_number, primary_doc):
-    cik_archive = cik_for_archive_path(cik_10)
-    accession_clean = accession_without_dashes(accession_number)
-    base = f"https://www.sec.gov/Archives/edgar/data/{cik_archive}/{accession_clean}/"
+    filing_detail_url = build_filing_detail_url(cik_10, accession_number)
+    base = filing_detail_url.rsplit("/", 1)[0] + "/"
     primary_doc_url = f"{base}{primary_doc}" if primary_doc else ""
-    return base, primary_doc_url
+    return filing_detail_url, primary_doc_url
 
 
 def insert_sec_filing(conn, filing):
