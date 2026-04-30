@@ -201,44 +201,61 @@ def is_valid_sec_archive_document_url(url: str) -> bool:
 
 def extract_exhibit_links(source_url: str) -> List[Dict[str, str]]:
     html = fetch_url_text(source_url)
+    return extract_exhibit_links_from_html(html, source_url)
+
+
+def extract_exhibit_links_from_html(html: str, source_url: str) -> List[Dict[str, str]]:
     soup = BeautifulSoup(html, "html.parser")
 
     found: List[Dict[str, str]] = []
     seen = set()
-
-    for row in soup.select("tr"):
-        cells = row.find_all("td")
-        if len(cells) < 3:
+    doc_tables = soup.select("table.tableFile")
+    for table in doc_tables:
+        header_cells = table.select("tr th")
+        headers = [th.get_text(" ", strip=True).lower() for th in header_cells]
+        if not headers:
+            continue
+        header_index = {name: idx for idx, name in enumerate(headers)}
+        if "document" not in header_index or "type" not in header_index:
             continue
 
-        row_text = " | ".join(cell.get_text(" ", strip=True) for cell in cells)
-        exhibit_type = detect_exhibit_type(row_text)
-        if not exhibit_type:
-            continue
+        for row in table.select("tr"):
+            cells = row.find_all("td")
+            if not cells:
+                continue
 
-        link_tag = row.find("a", href=True)
-        if not link_tag:
-            continue
+            doc_idx = header_index.get("document", 1)
+            type_idx = header_index.get("type", 3)
+            description_idx = header_index.get("description", 1)
 
-        doc_url = absolutize_sec_url(link_tag.get("href", ""), source_url)
-        if not doc_url or not is_valid_sec_archive_document_url(doc_url) or doc_url in seen:
-            continue
-        seen.add(doc_url)
+            link_tag = cells[doc_idx].find("a", href=True) if doc_idx < len(cells) else None
+            if not link_tag:
+                continue
 
-        title_candidates = [
-            cells[1].get_text(" ", strip=True) if len(cells) > 1 else "",
-            cells[2].get_text(" ", strip=True) if len(cells) > 2 else "",
-            link_tag.get_text(" ", strip=True),
-        ]
-        doc_title = next((t for t in title_candidates if t), "")
+            type_text = cells[type_idx].get_text(" ", strip=True) if type_idx < len(cells) else ""
+            description_text = (
+                cells[description_idx].get_text(" ", strip=True) if description_idx < len(cells) else ""
+            )
+            doc_name_text = cells[doc_idx].get_text(" ", strip=True) if doc_idx < len(cells) else ""
+            link_text = link_tag.get_text(" ", strip=True)
 
-        found.append(
-            {
-                "document_type": exhibit_type,
-                "document_title": doc_title,
-                "document_url": doc_url,
-            }
-        )
+            exhibit_type = detect_exhibit_type(type_text, doc_name_text, description_text, link_text)
+            if not exhibit_type:
+                continue
+
+            doc_url = absolutize_sec_url(link_tag.get("href", ""), source_url)
+            if not doc_url or not is_valid_sec_archive_document_url(doc_url) or doc_url in seen:
+                continue
+            seen.add(doc_url)
+
+            doc_title = next((t for t in [description_text, doc_name_text, link_text] if t), "")
+            found.append(
+                {
+                    "document_type": exhibit_type,
+                    "document_title": doc_title,
+                    "document_url": doc_url,
+                }
+            )
 
     found.sort(
         key=lambda row: (
