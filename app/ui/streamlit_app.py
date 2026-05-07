@@ -954,33 +954,20 @@ def get_sec_summary_and_rows(conn, ticker, window_hours):
         (ticker, window_hours),
     ).fetchone()
 
-    rows = conn.execute(
-        f"""
-        SELECT
-            COALESCE({accepted_expr}, sf.filing_date) AS accepted_at,
-            'SEC / 8-K' AS source,
-            COALESCE(sf.title, '8-K Filing') AS title,
-            COALESCE(NULLIF(sf.primary_doc_url, ''), sf.filing_detail_url) AS link_url
-        FROM sec_filings sf
-        WHERE sf.ticker = ?
-          AND datetime(COALESCE({accepted_expr}, sf.filing_date)) >= datetime(?)
-        ORDER BY datetime(COALESCE({accepted_expr}, sf.filing_date)) DESC
-        """,
-        (ticker, cutoff_str(window_hours)),
-    ).fetchall()
-
+    document_time_expr = f"COALESCE({accepted_expr}, sf.filing_date, sd.fetched_at)"
     document_rows = conn.execute(
         f"""
         SELECT
+            {document_time_expr} AS accepted_at,
             sd.document_type,
             COALESCE(NULLIF(sd.document_title, ''), sd.document_url) AS document_title,
             sd.document_url
         FROM sec_documents sd
-        JOIN sec_filings sf ON sf.id = sd.filing_id
+        LEFT JOIN sec_filings sf ON sf.id = sd.filing_id
         WHERE sd.ticker = ?
-          AND datetime(COALESCE({accepted_expr}, sf.filing_date)) >= datetime(?)
+          AND datetime({document_time_expr}) >= datetime(?)
         ORDER BY
-            datetime(COALESCE({accepted_expr}, sf.filing_date)) DESC,
+            datetime({document_time_expr}) DESC,
             CASE sd.document_type WHEN 'EX-99.1' THEN 0 WHEN 'EX-99.2' THEN 1 WHEN '8-K' THEN 2 ELSE 9 END,
             sd.id DESC
         """,
@@ -997,7 +984,6 @@ def get_sec_summary_and_rows(conn, ticker, window_hours):
     return {
         "summary": summary,
         "generated_at": generated_at,
-        "rows": rows,
         "document_rows": document_rows,
     }
 
@@ -1672,57 +1658,36 @@ try:
                     unsafe_allow_html=True
                 )
 
-                if not sec_state["rows"]:
+                if sec_state["summary"]:
                     st.markdown(
-                        '<div class="summary-text">No new 8-K filing</div>',
+                        f'<div class="summary-text">{sec_state["summary"]}</div>',
                         unsafe_allow_html=True
                     )
                 else:
-                    st.markdown(
-                        f'<div class="summary-text">{sec_state["summary"] or "中性：本時段無重大實質揭露。"}</div>',
-                        unsafe_allow_html=True
-                    )
+                    st.write("")
 
-                    sec_table_df = pd.DataFrame(
-                        [
-                            {
-                                "accepted_at": format_time(row[0]),
-                                "source": row[1] or "",
-                                "title": row[2] or "",
-                                "link": (
-                                    f'<a href=\"{row[3]}\" target=\"_blank\">Open</a>'
-                                    if row[3]
-                                    else ""
-                                ),
-                            }
-                            for row in sec_state["rows"]
-                        ]
-                    )
-                    sec_docs_df = pd.DataFrame(
-                        [
-                            {
-                                "type": drow[0] or "",
-                                "title": drow[1] or "",
-                                "link": (
-                                    f'<a href=\"{drow[2]}\" target=\"_blank\">Open</a>'
-                                    if drow[2]
-                                    else ""
-                                ),
-                            }
-                            for drow in sec_state["document_rows"]
-                        ]
-                    )
+                sec_table_df = pd.DataFrame(
+                    [
+                        {
+                            "accepted_at": format_time(drow[0]),
+                            "source": f"SEC / {drow[1]}" if drow[1] else "SEC",
+                            "title": drow[2] or "",
+                            "link": (
+                                f'<a href=\"{drow[3]}\" target=\"_blank\">Open</a>'
+                                if drow[3]
+                                else ""
+                            ),
+                        }
+                        for drow in sec_state["document_rows"]
+                    ],
+                    columns=["accepted_at", "source", "title", "link"],
+                )
 
-                    sec_filings_label = f"SEC Filings ({len(sec_table_df)})"
-                    if not sec_docs_df.empty:
-                        sec_filings_label = f"{sec_filings_label} · SEC Documents ({len(sec_docs_df)})"
-
-                    with st.expander(sec_filings_label, expanded=False):
+                with st.expander(f"SEC Filings ({len(sec_table_df)})", expanded=False):
+                    if sec_table_df.empty:
+                        st.write("")
+                    else:
                         st.markdown(render_news_like_table(sec_table_df), unsafe_allow_html=True)
-
-                        if not sec_docs_df.empty:
-                            st.markdown('<div class="summary-label">SEC Documents</div>', unsafe_allow_html=True)
-                            st.markdown(render_news_like_table(sec_docs_df), unsafe_allow_html=True)
             except sqlite3.Error as exc:
                 st.caption(f"SEC query error for {ticker}: {exc}")
 
