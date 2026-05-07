@@ -594,8 +594,24 @@ def get_latest_digest(conn: sqlite3.Connection, ticker: str, window_hours: int) 
     ).fetchone()
 
 
+def get_all_digest_tickers(conn: sqlite3.Connection, window_hours: int) -> List[str]:
+    rows = conn.execute(
+        """
+        SELECT DISTINCT ticker
+        FROM sec_digest
+        WHERE window_hours = ?
+        """,
+        (window_hours,),
+    ).fetchall()
+    return [row[0] for row in rows]
 
 
+def delete_sec_digest_for_ticker(conn: sqlite3.Connection, ticker: str, window_hours: int) -> None:
+    conn.execute(
+        "DELETE FROM sec_digest WHERE ticker = ? AND window_hours = ?",
+        (ticker, window_hours),
+    )
+    conn.commit()
 
 
 def extract_first_meaningful_ex99_part(clean_text: str) -> str:
@@ -739,8 +755,14 @@ def maybe_save_sec_digest(
     documents = data["documents"]
 
     if not filings:
-        print(f"[SEC DIGEST] ticker={ticker} window={window_hours}h action=skip reason=no_new_sec_data")
-        return "skip"
+        delete_sec_digest_for_ticker(conn, ticker, window_hours)
+        print(f"[SEC DIGEST] ticker={ticker} window={window_hours}h action=delete_stale reason=no_new_sec_data")
+        return "deleted"
+
+    if not documents:
+        delete_sec_digest_for_ticker(conn, ticker, window_hours)
+        print(f"[SEC DIGEST] ticker={ticker} window={window_hours}h action=delete_stale reason=no_current_sec_documents")
+        return "deleted"
 
     window_end = compute_window_end(filings, window_hours)
     latest_digest = get_latest_digest(conn, ticker, window_hours)
@@ -823,6 +845,16 @@ def main() -> None:
         ensure_schema(conn)
 
         filings = get_recent_filings(conn, args.window_hours)
+        recent_tickers = sorted({filing[1] for filing in filings})
+        digest_tickers = get_all_digest_tickers(conn, args.window_hours)
+        stale_digest_tickers = sorted(set(digest_tickers) - set(recent_tickers))
+
+        for ticker in stale_digest_tickers:
+            delete_sec_digest_for_ticker(conn, ticker, args.window_hours)
+            print(
+                f"[SEC DIGEST] ticker={ticker} window={args.window_hours}h action=delete_stale reason=no_new_sec_data"
+            )
+
         if not filings:
             print(f"No recent SEC filings found in last {args.window_hours}h.")
             return
