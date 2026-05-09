@@ -7,6 +7,29 @@ DATA_DIR = BASE_DIR / "data"
 DB_PATH = DATA_DIR / "news.db"
 
 
+def ensure_articles_columns(cursor):
+    cursor.execute("PRAGMA table_info(articles)")
+    columns = {row[1] for row in cursor.fetchall()}
+
+    if "discovery_source" not in columns:
+        cursor.execute("ALTER TABLE articles ADD COLUMN discovery_source TEXT")
+
+    if "canonical_url" not in columns:
+        cursor.execute("ALTER TABLE articles ADD COLUMN canonical_url TEXT")
+
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_articles_canonical_url ON articles(canonical_url)"
+    )
+    cursor.execute(
+        """
+        UPDATE articles
+        SET discovery_source = source_type
+        WHERE discovery_source IS NULL
+          AND source_type IN ('google_news', 'yahoo_finance')
+        """
+    )
+
+
 def init_db():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -34,7 +57,9 @@ def init_db():
         title TEXT NOT NULL,
         source TEXT,
         source_type TEXT,
+        discovery_source TEXT,
         url TEXT NOT NULL,
+        canonical_url TEXT,
         published_at TEXT,
         content TEXT,
         content_status TEXT,
@@ -43,6 +68,8 @@ def init_db():
         UNIQUE(ticker, url)
     )
     """)
+
+    ensure_articles_columns(cursor)
 
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS company_digest (

@@ -19,7 +19,13 @@ def get_db_connection():
 def get_recent_articles_to_process(conn, limit=10):
     cursor = conn.cursor()
     cursor.execute(f"""
-        SELECT id, ticker, title, url, published_at
+        SELECT
+            id,
+            ticker,
+            title,
+            url,
+            published_at,
+            COALESCE(discovery_source, source_type, '') AS discovery_source
         FROM articles
         WHERE content_status IS NULL
           AND published_at >= datetime('now', '-{LOOKBACK_HOURS} hours')
@@ -75,19 +81,23 @@ def process_articles():
 
     print(f"Found {len(articles)} recent articles to process.\n")
 
-    for article_id, ticker, title, url, published_at in articles:
+    for article_id, ticker, title, url, published_at, discovery_source in articles:
         print(f"Processing {ticker} | {title}")
         print(f"  Published at: {published_at}")
 
-        real_url, decode_error = decode_google_news_url(url)
+        if discovery_source == "google_news":
+            real_url, decode_error = decode_google_news_url(url)
 
-        if decode_error:
-            update_article(conn, article_id, None, "failed", decode_error)
-            print("  Failed: decode_failed\n")
-            time.sleep(SLEEP_SECONDS)
-            continue
+            if decode_error:
+                update_article(conn, article_id, None, "failed", decode_error)
+                print("  Failed: decode_failed\n")
+                time.sleep(SLEEP_SECONDS)
+                continue
 
-        print(f"  Decoded URL: {real_url}")
+            print(f"  Decoded URL: {real_url}")
+        else:
+            real_url = url
+            print(f"  Article URL: {real_url}")
 
         content, error = fetch_article_content(real_url)
 

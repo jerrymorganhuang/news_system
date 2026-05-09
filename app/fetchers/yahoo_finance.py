@@ -1,83 +1,31 @@
+import json
 import os
 import sys
 import sqlite3
 import urllib.parse
+import urllib.request
 from datetime import datetime, timezone, timedelta
 
 # Allow this fetcher to run both as a script and as an imported module.
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
-from email.utils import parsedate_to_datetime
-
-import feedparser
 
 from app.db.init_db import ensure_articles_columns
 from app.fetchers.url_utils import normalize_canonical_url
 
-# 專案根目錄
+# Yahoo Finance discovery endpoint used here:
+# https://query1.finance.yahoo.com/v1/finance/search?q={ticker}&quotesCount=0&newsCount={n}
+# The endpoint returns ticker-scoped Yahoo Finance search results, including news
+# items with title, link, publisher, and providerPublishTime fields.
+
 DB_PATH = os.path.join(BASE_DIR, "data", "news.db")
 
 LOOKBACK_HOURS = 48
+NEWS_COUNT = 25
+YAHOO_SEARCH_URL = "https://query1.finance.yahoo.com/v1/finance/search"
+USER_AGENT = "Mozilla/5.0 (compatible; news_system/1.0)"
 
-# ===== 來源過濾設定 =====
-# 先用白名單做主過濾：只保留你覺得值得看的來源
-ALLOWED_SOURCES = {
-    "Reuters",
-    "Bloomberg",
-    "CNBC",
-    "Financial Times",
-    "The Wall Street Journal",
-    "Wall Street Journal",
-    "Barron's",
-    "MarketWatch",
-    "Yahoo Finance",
-    "Seeking Alpha",
-    "Investor's Business Daily",
-    "TipRanks",
-    "Benzinga",
-    "The Information",
-    "Associated Press",
-    "AP News",
-    "Business Wire",
-    "GlobeNewswire",
-    "PR Newswire",
-}
-
-# 黑名單關鍵字：常見垃圾站 / 地區站 / 聚合站
-BLOCKED_SOURCE_KEYWORDS = [
-    "india",
-    "nigeria",
-    "kenya",
-    "uganda",
-    "pakistan",
-    "philippines",
-    "malaysia",
-    "south africa",
-    "zambia",
-    "ghana",
-    "naija",
-    "tribune",
-    "herald",
-    "chronicle",
-    "daily times",
-    "post",
-    "gazette",
-    "observer",
-    "star",
-    "sun",
-    "times of india",
-    "business today",
-    "msn",
-    "aol",
-    "newsbreak",
-    "investing.com",
-    "streetinsider",
-    "fool",
-    "motley fool",
-]
-
-# 名稱正規化：避免同一來源出現多種寫法
 SOURCE_NORMALIZATION = {
     "reuters.com": "Reuters",
     "reuters": "Reuters",
@@ -113,50 +61,49 @@ def get_db_connection():
 def get_watchlist(conn):
     cursor = conn.cursor()
     cursor.execute("""
-        SELECT
-            w.ticker,
-            w.company_name,
-            COALESCE(
-                NULLIF(tsm.google_query, ''),
-                NULLIF(w.company_name, ''),
-                w.ticker
-            ) AS google_query
-        FROM watchlist w
-        LEFT JOIN ticker_source_map tsm
-          ON tsm.ticker = w.ticker
+        SELECT ticker, company_name
+        FROM watchlist
+        ORDER BY ticker
     """)
     return cursor.fetchall()
 
 
-def build_google_news_rss_url(query):
-    encoded_query = urllib.parse.quote(query)
-    return f"https://news.google.com/rss/search?q={encoded_query}&hl=en-US&gl=US&ceid=US:en"
+def build_yahoo_finance_url(ticker):
+    query = urllib.parse.urlencode(
+        {
+            "q": ticker,
+            "quotesCount": 0,
+            "newsCount": NEWS_COUNT,
+            "enableFuzzyQuery": "false",
+        }
+    )
+    return f"{YAHOO_SEARCH_URL}?{query}"
 
 
-def parse_google_pubdate(pubdate_str):
-    """
-    Google News RSS 時間例子:
-    'Sun, 08 Mar 2026 08:00:00 GMT'
-    轉成 SQLite 好比較的 UTC 格式:
-    '2026-03-08 08:00:00'
-    """
-    if not pubdate_str:
+def fetch_yahoo_news(ticker):
+    url = build_yahoo_finance_url(ticker)
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+
+    with urllib.request.urlopen(request, timeout=20) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+
+    return payload.get("news") or []
+
+
+def parse_yahoo_publish_time(value):
+    if not value:
         return None
 
     try:
-        dt = parsedate_to_datetime(pubdate_str)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        dt_utc = dt.astimezone(timezone.utc)
-        return dt_utc.strftime("%Y-%m-%d %H:%M:%S")
+        timestamp = int(value)
+        return datetime.fromtimestamp(timestamp, tz=timezone.utc).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
     except Exception:
         return None
 
 
 def is_within_lookback(published_at_str, lookback_hours=48):
-    """
-    published_at_str 必須是 '%Y-%m-%d %H:%M:%S' 格式，且視為 UTC。
-    """
     if not published_at_str:
         return False
 
@@ -171,9 +118,6 @@ def is_within_lookback(published_at_str, lookback_hours=48):
 
 
 def normalize_source_name(source):
-    """
-    將來源名稱做標準化，避免同一來源出現不同名稱。
-    """
     if not source:
         return ""
 
@@ -187,34 +131,7 @@ def normalize_source_name(source):
     return source_clean
 
 
-def is_allowed_source(source):
-    """
-    來源過濾邏輯：
-    1. 沒有 source → 不收
-    2. 若命中黑名單關鍵字 → 不收
-    3. 若在白名單 → 收
-    4. 其他一律不收
-    """
-    if not source:
-        return False
-
-    source_norm = normalize_source_name(source)
-    source_lower = source_norm.lower()
-
-    for keyword in BLOCKED_SOURCE_KEYWORDS:
-        if keyword in source_lower:
-            return False
-
-    if source_norm in ALLOWED_SOURCES:
-        return True
-
-    return False
-
-
 def article_exists(conn, canonical_url):
-    """
-    Deduplicate only by canonical URL.
-    """
     cursor = conn.cursor()
     cursor.execute("""
         SELECT 1
@@ -244,11 +161,11 @@ def save_article(conn, ticker, title, source, published_at, url, canonical_url):
         ticker,
         title,
         source,
-        "google_news",
-        "google_news",
+        "yahoo_finance",
+        "yahoo_finance",
         url,
         canonical_url,
-        published_at
+        published_at,
     ))
     conn.commit()
 
@@ -264,48 +181,40 @@ def fetch_and_store():
         conn.close()
         return
 
+    total_fetched = 0
     total_saved = 0
     total_skipped_old = 0
     total_skipped_dup = 0
-    total_skipped_bad_source = 0
     total_skipped_invalid = 0
+    failed_tickers = []
 
-    for ticker, company_name, google_query in watchlist:
-        print(f"\nFetching news for {ticker} | {company_name}")
+    for ticker, company_name in watchlist:
+        print(f"\nFetching Yahoo Finance news for {ticker} | {company_name}")
 
-        rss_url = build_google_news_rss_url(google_query)
-        feed = feedparser.parse(rss_url)
-
-        if not feed.entries:
-            print("  No articles found.")
+        try:
+            news_items = fetch_yahoo_news(ticker)
+        except Exception as exc:
+            failed_tickers.append((ticker, str(exc)))
+            print(f"  Failed ticker: {ticker} | {exc}")
             continue
+
+        total_fetched += len(news_items)
+        print(f"  Yahoo articles fetched: {len(news_items)}")
 
         saved_count = 0
         skipped_old = 0
         skipped_dup = 0
-        skipped_bad_source = 0
         skipped_invalid = 0
 
-        for entry in feed.entries:
-            title = entry.get("title", "").strip()
-            url = entry.get("link", "").strip()
-            raw_published = entry.get("published", "").strip()
-            published_at = parse_google_pubdate(raw_published)
-
-            source = ""
-            if hasattr(entry, "source") and entry.source:
-                source = entry.source.get("title", "").strip()
-
-            source = normalize_source_name(source)
-
+        for item in news_items:
+            title = (item.get("title") or "").strip()
+            url = (item.get("link") or "").strip()
+            source = normalize_source_name((item.get("publisher") or "").strip())
+            published_at = parse_yahoo_publish_time(item.get("providerPublishTime"))
             canonical_url = normalize_canonical_url(url)
 
             if not title or not url or not canonical_url or not published_at:
                 skipped_invalid += 1
-                continue
-
-            if not is_allowed_source(source):
-                skipped_bad_source += 1
                 continue
 
             if not is_within_lookback(published_at, LOOKBACK_HOURS):
@@ -323,30 +232,33 @@ def fetch_and_store():
                 source=source,
                 published_at=published_at,
                 url=url,
-                canonical_url=canonical_url
+                canonical_url=canonical_url,
             )
             saved_count += 1
 
         total_saved += saved_count
         total_skipped_old += skipped_old
         total_skipped_dup += skipped_dup
-        total_skipped_bad_source += skipped_bad_source
         total_skipped_invalid += skipped_invalid
 
-        print(f"  Saved: {saved_count}")
+        print(f"  Inserted: {saved_count}")
         print(f"  Skipped old (>48h): {skipped_old}")
-        print(f"  Skipped duplicates: {skipped_dup}")
-        print(f"  Skipped bad source: {skipped_bad_source}")
+        print(f"  Skipped duplicate canonical URLs: {skipped_dup}")
         print(f"  Skipped invalid rows: {skipped_invalid}")
 
     conn.close()
 
-    print("\nDone.")
-    print(f"Total saved: {total_saved}")
+    print("\nYahoo Finance fetch done.")
+    print(f"Total Yahoo articles fetched: {total_fetched}")
+    print(f"Total inserted: {total_saved}")
     print(f"Total skipped old: {total_skipped_old}")
-    print(f"Total skipped duplicates: {total_skipped_dup}")
-    print(f"Total skipped bad source: {total_skipped_bad_source}")
+    print(f"Total skipped duplicate canonical URLs: {total_skipped_dup}")
     print(f"Total skipped invalid rows: {total_skipped_invalid}")
+
+    if failed_tickers:
+        print("Failed tickers:")
+        for ticker, error in failed_tickers:
+            print(f"  {ticker}: {error}")
 
 
 if __name__ == "__main__":
