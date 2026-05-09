@@ -26,6 +26,67 @@ NEWS_COUNT = 25
 YAHOO_SEARCH_URL = "https://query1.finance.yahoo.com/v1/finance/search"
 USER_AGENT = "Mozilla/5.0 (compatible; news_system/1.0)"
 
+# ===== Yahoo-only source filtering =====
+# Keep this logic local to Yahoo Finance ingestion so Google News behavior remains
+# unchanged while Yahoo uses the same allowed-source / blocked-keyword pattern.
+ALLOWED_SOURCES = {
+    "Reuters",
+    "Bloomberg",
+    "CNBC",
+    "Financial Times",
+    "The Wall Street Journal",
+    "Wall Street Journal",
+    "Barron's",
+    "MarketWatch",
+    "Yahoo Finance",
+    "Seeking Alpha",
+    "Investor's Business Daily",
+    "TipRanks",
+    "Benzinga",
+    "The Information",
+    "Associated Press",
+    "AP News",
+    "Business Wire",
+    "GlobeNewswire",
+    "PR Newswire",
+}
+
+BLOCKED_SOURCE_KEYWORDS = [
+    "india",
+    "nigeria",
+    "kenya",
+    "uganda",
+    "pakistan",
+    "philippines",
+    "malaysia",
+    "south africa",
+    "zambia",
+    "ghana",
+    "naija",
+    "tribune",
+    "herald",
+    "chronicle",
+    "daily times",
+    "post",
+    "gazette",
+    "observer",
+    "star",
+    "sun",
+    "times of india",
+    "business today",
+    "msn",
+    "aol",
+    "newsbreak",
+    "investing.com",
+    "streetinsider",
+    "insider monkey",
+    "simply wall st",
+    "fool",
+    "motley fool",
+    "zacks",
+    "investorplace",
+]
+
 SOURCE_NORMALIZATION = {
     "reuters.com": "Reuters",
     "reuters": "Reuters",
@@ -131,6 +192,23 @@ def normalize_source_name(source):
     return source_clean
 
 
+def is_allowed_source(source):
+    if not source:
+        return False
+
+    source_norm = normalize_source_name(source)
+    source_lower = source_norm.lower()
+
+    for keyword in BLOCKED_SOURCE_KEYWORDS:
+        if keyword in source_lower:
+            return False
+
+    if source_norm in ALLOWED_SOURCES:
+        return True
+
+    return False
+
+
 def article_exists(conn, canonical_url):
     cursor = conn.cursor()
     cursor.execute("""
@@ -185,6 +263,7 @@ def fetch_and_store():
     total_saved = 0
     total_skipped_old = 0
     total_skipped_dup = 0
+    total_skipped_bad_source = 0
     total_skipped_invalid = 0
     failed_tickers = []
 
@@ -204,6 +283,7 @@ def fetch_and_store():
         saved_count = 0
         skipped_old = 0
         skipped_dup = 0
+        skipped_bad_source = 0
         skipped_invalid = 0
 
         for item in news_items:
@@ -215,6 +295,10 @@ def fetch_and_store():
 
             if not title or not url or not canonical_url or not published_at:
                 skipped_invalid += 1
+                continue
+
+            if not is_allowed_source(source):
+                skipped_bad_source += 1
                 continue
 
             if not is_within_lookback(published_at, LOOKBACK_HOURS):
@@ -239,20 +323,23 @@ def fetch_and_store():
         total_saved += saved_count
         total_skipped_old += skipped_old
         total_skipped_dup += skipped_dup
+        total_skipped_bad_source += skipped_bad_source
         total_skipped_invalid += skipped_invalid
 
-        print(f"  Inserted: {saved_count}")
+        print(f"  Saved: {saved_count}")
         print(f"  Skipped old (>48h): {skipped_old}")
-        print(f"  Skipped duplicate canonical URLs: {skipped_dup}")
+        print(f"  Skipped duplicates: {skipped_dup}")
+        print(f"  Skipped bad source: {skipped_bad_source}")
         print(f"  Skipped invalid rows: {skipped_invalid}")
 
     conn.close()
 
     print("\nYahoo Finance fetch done.")
     print(f"Total Yahoo articles fetched: {total_fetched}")
-    print(f"Total inserted: {total_saved}")
+    print(f"Total saved: {total_saved}")
     print(f"Total skipped old: {total_skipped_old}")
-    print(f"Total skipped duplicate canonical URLs: {total_skipped_dup}")
+    print(f"Total skipped duplicates: {total_skipped_dup}")
+    print(f"Total skipped bad source: {total_skipped_bad_source}")
     print(f"Total skipped invalid rows: {total_skipped_invalid}")
 
     if failed_tickers:
