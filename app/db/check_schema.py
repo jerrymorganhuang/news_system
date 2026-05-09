@@ -13,6 +13,8 @@ REQUIRED_ARTICLES_COLUMNS = {
     "content",
     "content_status",
     "content_error",
+    "discovery_source",
+    "canonical_url",
 }
 
 REQUIRED_COMPANY_DIGEST_COLUMNS = {
