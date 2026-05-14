@@ -26,15 +26,22 @@ SEC_USER_AGENT = os.getenv(
 )
 MODEL = "gpt-5-mini"
 SUPPORTED_WINDOWS = {24, 48}
+SEC_EVENT_FORMS = {"8-K", "6-K"}
 MAX_EXCERPT_CHARS = 1200
 MAX_DOCS_PER_FILING = 3
 EX99_FALLBACK_CHARS = 9000
 EX99_PAGE_LIMIT = 2
+MIN_FALLBACK_TEXT_CHARS = 80
 
 EXHIBIT_RULES = [
     ("EX-99.1", re.compile(r"\b(?:EX\s*[-.]?\s*)?99\s*[-.]?\s*0?1\b", re.IGNORECASE)),
     ("EX-99.2", re.compile(r"\b(?:EX\s*[-.]?\s*)?99\s*[-.]?\s*0?2\b", re.IGNORECASE)),
 ]
+EX99_ANY_PATTERN = re.compile(r"\b(?:EX\s*[-.]?\s*)?99(?:\s*[-.]?\s*\d+)?\b", re.IGNORECASE)
+FALLBACK_DOCUMENT_PATTERN = re.compile(
+    r"\b(?:press\s+release|earnings|results|financial|quarterly|annual|release)\b",
+    re.IGNORECASE,
+)
 
 BOILERPLATE_PATTERNS = [
     re.compile(r"^\s*UNITED\s+STATES\s+SECURITIES\s+AND\s+EXCHANGE\s+COMMISSION\s*$", re.IGNORECASE),
@@ -179,6 +186,63 @@ def detect_exhibit_type(*candidates: str) -> Optional[str]:
     return None
 
 
+def detect_ex99_document_type(*candidates: str) -> Optional[str]:
+    exhibit_type = detect_exhibit_type(*candidates)
+    if exhibit_type:
+        return exhibit_type
+    joined = " | ".join((c or "") for c in candidates)
+    if EX99_ANY_PATTERN.search(joined):
+        return "EX-99"
+    return None
+
+
+def is_fallback_keyword_document(document_title: str, document_url: str) -> bool:
+    return bool(FALLBACK_DOCUMENT_PATTERN.search(f"{document_title or ''} {document_url or ''}"))
+
+
+def is_usable_fallback_document(clean_text: str) -> bool:
+    text = (clean_text or "").strip()
+    if not text:
+        return False
+    alnum_chars = re.sub(r"[^A-Za-z0-9]", "", text)
+    return len(alnum_chars) >= MIN_FALLBACK_TEXT_CHARS
+
+
+def rank_6k_candidate(document: Dict[str, str]) -> int:
+    doc_type = (document.get("document_type") or "").upper().strip()
+    if doc_type == "EX-99.1":
+        return 0
+    if doc_type.startswith("EX-99"):
+        return 1
+    if is_fallback_keyword_document(document.get("document_title", ""), document.get("document_url", "")):
+        return 2
+    if doc_type == "6-K":
+        return 3
+    return 9
+
+
+def select_6k_documents_for_fetch(
+    documents: List[Dict[str, str]], primary_document: Dict[str, str]
+) -> List[Dict[str, str]]:
+    ex99_1 = [doc for doc in documents if (doc.get("document_type") or "").upper().strip() == "EX-99.1"]
+    if ex99_1:
+        return sorted(ex99_1, key=lambda doc: doc.get("document_url", ""))
+
+    other_ex99 = [doc for doc in documents if (doc.get("document_type") or "").upper().strip().startswith("EX-99")]
+    if other_ex99:
+        return sorted(other_ex99, key=lambda doc: (rank_6k_candidate(doc), doc.get("document_url", "")))
+
+    keyword_docs = [
+        doc
+        for doc in documents
+        if is_fallback_keyword_document(doc.get("document_title", ""), doc.get("document_url", ""))
+    ]
+    if keyword_docs:
+        return sorted(keyword_docs, key=lambda doc: doc.get("document_url", ""))
+
+    return [primary_document]
+
+
 def absolutize_sec_url(link: str, detail_url: str) -> str:
     link = (link or "").strip()
     if not link:
@@ -202,6 +266,11 @@ def is_valid_sec_archive_document_url(url: str) -> bool:
 def extract_exhibit_links(source_url: str) -> List[Dict[str, str]]:
     html = fetch_url_text(source_url)
     return extract_exhibit_links_from_html(html, source_url)
+
+
+def extract_document_links(source_url: str) -> List[Dict[str, str]]:
+    html = fetch_url_text(source_url)
+    return extract_document_links_from_html(html, source_url)
 
 
 def extract_exhibit_links_from_html(html: str, source_url: str) -> List[Dict[str, str]]:
@@ -263,6 +332,60 @@ def extract_exhibit_links_from_html(html: str, source_url: str) -> List[Dict[str
             row["document_url"],
         )
     )
+    return found
+
+
+def extract_document_links_from_html(html: str, source_url: str) -> List[Dict[str, str]]:
+    soup = BeautifulSoup(html, "html.parser")
+
+    found: List[Dict[str, str]] = []
+    seen = set()
+    for table in soup.select("table.tableFile"):
+        header_cells = table.select("tr th")
+        headers = [th.get_text(" ", strip=True).lower() for th in header_cells]
+        if not headers:
+            continue
+        header_index = {name: idx for idx, name in enumerate(headers)}
+        if "document" not in header_index:
+            continue
+
+        for row in table.select("tr"):
+            cells = row.find_all("td")
+            if not cells:
+                continue
+
+            doc_idx = header_index.get("document", 1)
+            type_idx = header_index.get("type", 3)
+            description_idx = header_index.get("description", 1)
+
+            link_tag = cells[doc_idx].find("a", href=True) if doc_idx < len(cells) else None
+            if not link_tag:
+                continue
+
+            type_text = cells[type_idx].get_text(" ", strip=True) if type_idx < len(cells) else ""
+            description_text = (
+                cells[description_idx].get_text(" ", strip=True) if description_idx < len(cells) else ""
+            )
+            doc_name_text = cells[doc_idx].get_text(" ", strip=True) if doc_idx < len(cells) else ""
+            link_text = link_tag.get_text(" ", strip=True)
+
+            doc_url = absolutize_sec_url(link_tag.get("href", ""), source_url)
+            if not doc_url or not is_valid_sec_archive_document_url(doc_url) or doc_url in seen:
+                continue
+            seen.add(doc_url)
+
+            doc_title = next((t for t in [description_text, doc_name_text, link_text] if t), "")
+            found.append(
+                {
+                    "document_type": detect_ex99_document_type(
+                        type_text, doc_name_text, description_text, link_text
+                    ) or type_text or "DOCUMENT",
+                    "document_title": doc_title,
+                    "document_url": doc_url,
+                }
+            )
+
+    found.sort(key=lambda row: (rank_6k_candidate(row), row["document_url"]))
     return found
 
 
@@ -434,7 +557,7 @@ def get_recent_filings(conn: sqlite3.Connection, window_hours: int) -> List[sqli
     cursor = conn.cursor()
     cursor.execute(
         """
-        SELECT id, ticker, cik, accession_number, accepted_datetime, filing_date, item_numbers, title, filing_detail_url, primary_doc_url
+        SELECT id, ticker, cik, accession_number, accepted_datetime, filing_date, item_numbers, title, filing_detail_url, primary_doc_url, form_type
         FROM sec_filings
         ORDER BY datetime(COALESCE(filing_date, accepted_datetime)) DESC
         """
@@ -443,6 +566,8 @@ def get_recent_filings(conn: sqlite3.Connection, window_hours: int) -> List[sqli
     cutoff = datetime.now(timezone.utc) - timedelta(hours=window_hours)
     filings = []
     for row in cursor.fetchall():
+        if (row[10] or "").upper().strip() not in SEC_EVENT_FORMS:
+            continue
         accepted_dt = parse_sec_datetime(row[4]) or parse_sec_datetime(row[5])
         if accepted_dt and accepted_dt >= cutoff:
             filings.append(row)
@@ -462,16 +587,18 @@ def process_documents(conn: sqlite3.Connection, filings: List[sqlite3.Row]) -> N
             "title": filing[7],
             "filing_detail_url": filing[8],
             "primary_doc_url": filing[9],
+            "form_type": filing[10],
         }
         if not filing_dict["filing_detail_url"] and not filing_dict["primary_doc_url"]:
             continue
+        form_type = (filing_dict["form_type"] or "8-K").upper().strip()
         primary_url = filing_dict["primary_doc_url"] or filing_dict["filing_detail_url"]
         upsert_sec_document(
             conn,
             filing_dict,
             {
-                "document_type": "8-K",
-                "document_title": filing_dict["title"] or "Primary 8-K",
+                "document_type": form_type,
+                "document_title": filing_dict["title"] or f"Primary {form_type}",
                 "document_url": primary_url,
             },
         )
@@ -484,7 +611,10 @@ def process_documents(conn: sqlite3.Connection, filings: List[sqlite3.Row]) -> N
                 continue
             seen_sources.add(source_url)
             try:
-                exhibits.extend(extract_exhibit_links(source_url))
+                if form_type == "6-K":
+                    exhibits.extend(extract_document_links(source_url))
+                else:
+                    exhibits.extend(extract_exhibit_links(source_url))
             except Exception as exc:
                 print(
                     f"[SEC DOC] ticker={filing_dict['ticker']} accession={filing_dict['accession_number']} detect_error source={source_url} err={exc}"
@@ -493,7 +623,17 @@ def process_documents(conn: sqlite3.Connection, filings: List[sqlite3.Row]) -> N
         deduped = {}
         for exhibit in exhibits:
             deduped[exhibit["document_url"]] = exhibit
-        for exhibit in deduped.values():
+        selected_exhibits = list(deduped.values())
+        if form_type == "6-K":
+            selected_exhibits = select_6k_documents_for_fetch(
+                selected_exhibits,
+                {
+                    "document_type": "6-K",
+                    "document_title": filing_dict["title"] or "Primary 6-K",
+                    "document_url": primary_url,
+                },
+            )
+        for exhibit in selected_exhibits:
             upsert_sec_document(conn, filing_dict, exhibit)
 
     conn.commit()
@@ -516,6 +656,7 @@ def get_tickers_for_window(conn: sqlite3.Connection, window_hours: int) -> List[
             SELECT accepted_datetime, filing_date
             FROM sec_filings
             WHERE ticker = ?
+              AND form_type IN ('8-K', '6-K')
             ORDER BY datetime(COALESCE(filing_date, accepted_datetime)) DESC
             LIMIT 1
             """,
@@ -534,7 +675,7 @@ def fetch_window_data(conn: sqlite3.Connection, ticker: str, window_hours: int) 
     cursor = conn.cursor()
     filings_all = cursor.execute(
         """
-        SELECT id, ticker, accepted_datetime, filing_date, item_numbers, title
+        SELECT id, ticker, accepted_datetime, filing_date, item_numbers, title, form_type
         FROM sec_filings
         WHERE ticker = ?
         ORDER BY datetime(COALESCE(filing_date, accepted_datetime)) DESC
@@ -546,6 +687,8 @@ def fetch_window_data(conn: sqlite3.Connection, ticker: str, window_hours: int) 
     filings = []
     filing_ids = []
     for row in filings_all:
+        if (row[6] or "").upper().strip() not in SEC_EVENT_FORMS:
+            continue
         row_dt = parse_sec_datetime(row[2]) or parse_sec_datetime(row[3])
         if row_dt and row_dt >= cutoff:
             filings.append(row)
@@ -632,19 +775,56 @@ def extract_first_meaningful_ex99_part(clean_text: str) -> str:
     return text[:EX99_FALLBACK_CHARS].strip()
 
 
-def select_documents_for_summary(documents: List[sqlite3.Row]) -> List[Dict[str, str]]:
+def format_summary_document(doc: sqlite3.Row) -> Dict[str, str]:
+    return {
+        "document_type": doc[1],
+        "document_title": doc[2] or "N/A",
+        "content_status": doc[5] or "N/A",
+        "clean_text_excerpt": (doc[4] or "").strip() or "[No text extracted]",
+    }
+
+
+def select_documents_for_summary(form_type: str, documents: List[sqlite3.Row]) -> List[Dict[str, str]]:
+    normalized_form_type = (form_type or "8-K").upper().strip()
     primary_8k = None
+    primary_6k = None
     ex99_1 = None
+    other_ex99 = []
+    keyword_docs = []
 
     for doc in documents:
         doc_type = (doc[1] or "").upper().strip()
         if primary_8k is None and doc_type == "8-K":
             primary_8k = doc
+        if primary_6k is None and doc_type == "6-K":
+            primary_6k = doc
         normalized_exhibit_type = detect_exhibit_type(doc_type, doc[2] or "", doc[3] or "")
         if ex99_1 is None and normalized_exhibit_type == "EX-99.1":
             ex99_1 = doc
+        elif doc_type.startswith("EX-99"):
+            other_ex99.append(doc)
+        elif is_fallback_keyword_document(doc[2] or "", doc[3] or ""):
+            keyword_docs.append(doc)
 
     selected: List[Dict[str, str]] = []
+
+    if normalized_form_type == "6-K":
+        if ex99_1 is not None:
+            excerpt = extract_first_meaningful_ex99_part(ex99_1[4] or "")
+            selected.append({
+                "document_type": ex99_1[1],
+                "document_title": ex99_1[2] or "N/A",
+                "content_status": ex99_1[5] or "N/A",
+                "clean_text_excerpt": excerpt or "[No text extracted]",
+            })
+            return selected
+
+        for fallback_docs in (other_ex99, keyword_docs, [primary_6k] if primary_6k is not None else []):
+            usable_docs = [doc for doc in fallback_docs if is_usable_fallback_document(doc[4] or "")]
+            if usable_docs:
+                return [format_summary_document(doc) for doc in usable_docs[:MAX_DOCS_PER_FILING]]
+
+        return selected
 
     if primary_8k is not None:
         selected.append({
@@ -664,6 +844,26 @@ def select_documents_for_summary(documents: List[sqlite3.Row]) -> List[Dict[str,
         })
 
     return selected
+
+
+def has_6k_filing(filings: List[sqlite3.Row]) -> bool:
+    for filing in filings:
+        form_type = filing[6] if len(filing) > 6 else "8-K"
+        if (form_type or "").upper().strip() == "6-K":
+            return True
+    return False
+
+
+def has_documents_for_summary(filings: List[sqlite3.Row], documents: List[sqlite3.Row]) -> bool:
+    doc_by_filing: Dict[int, List[sqlite3.Row]] = {}
+    for doc in documents:
+        doc_by_filing.setdefault(doc[0], []).append(doc)
+
+    for filing in filings:
+        form_type = filing[6] if len(filing) > 6 else "8-K"
+        if select_documents_for_summary(form_type, doc_by_filing.get(filing[0], [])):
+            return True
+    return False
 
 def rank_document_for_digest(doc: sqlite3.Row) -> tuple:
     document_type = (doc[1] or '').upper()
@@ -695,15 +895,22 @@ def build_digest_prompt(ticker: str, window_hours: int, filings: List[sqlite3.Ro
 
     filing_blocks = []
     for i, filing in enumerate(filings, start=1):
-        filing_id, _, accepted_datetime, filing_date, item_numbers, title = filing
+        filing_id = filing[0]
+        accepted_datetime = filing[2]
+        filing_date = filing[3]
+        item_numbers = filing[4]
+        title = filing[5]
+        form_type = filing[6] if len(filing) > 6 else "8-K"
         accepted = accepted_datetime or filing_date or ""
-        lines = [
-            f"Filing {i}",
+        lines = [f"Filing {i}"]
+        if (form_type or "").upper().strip() != "8-K":
+            lines.append(f"form_type: {form_type or 'N/A'}")
+        lines.extend([
             f"accepted_time: {accepted}",
             f"item_numbers: {item_numbers or 'N/A'}",
             f"title: {title or 'N/A'}",
-        ]
-        selected_docs = select_documents_for_summary(doc_by_filing.get(filing_id, []))
+        ])
+        selected_docs = select_documents_for_summary(form_type, doc_by_filing.get(filing_id, []))
         for doc in selected_docs:
             lines.extend(
                 [
@@ -762,6 +969,11 @@ def maybe_save_sec_digest(
     if not documents:
         delete_sec_digest_for_ticker(conn, ticker, window_hours)
         print(f"[SEC DIGEST] ticker={ticker} window={window_hours}h action=delete_stale reason=no_current_sec_documents")
+        return "deleted"
+
+    if has_6k_filing(filings) and not has_documents_for_summary(filings, documents):
+        delete_sec_digest_for_ticker(conn, ticker, window_hours)
+        print(f"[SEC DIGEST] ticker={ticker} window={window_hours}h action=delete_stale reason=no_usable_sec_documents")
         return "deleted"
 
     window_end = compute_window_end(filings, window_hours)

@@ -16,6 +16,7 @@ SEC_USER_AGENT = os.getenv(
     "SEC_USER_AGENT",
     "news_system/1.0 (SEC metadata fetch; contact: devnull@example.com)",
 )
+SEC_EVENT_FORMS = {"8-K", "6-K"}
 
 
 def get_connection():
@@ -198,7 +199,7 @@ def fetch_and_store_sec_8k(lookback_days=SEC_LOOKBACK_DAYS):
             total_rows = len(forms)
             for i in range(total_rows):
                 form_type = (forms[i] or "").strip() if i < len(forms) else ""
-                if form_type != "8-K":
+                if form_type not in SEC_EVENT_FORMS:
                     continue
 
                 filing_date = filing_dates[i] if i < len(filing_dates) else None
@@ -242,10 +243,10 @@ def fetch_and_store_sec_8k(lookback_days=SEC_LOOKBACK_DAYS):
 
     conn.close()
 
-    print("\n[SEC] 8-K fetch summary")
+    print("\n[SEC] 8-K/6-K fetch summary")
     print(f"[SEC] Tickers checked: {tickers_checked}")
     print(f"[SEC] Tickers skipped (missing CIK): {tickers_skipped_missing_cik}")
-    print(f"[SEC] 8-K filings inserted: {inserted}")
+    print(f"[SEC] 8-K/6-K filings inserted: {inserted}")
     print(f"[SEC] Duplicates skipped: {duplicates}")
     print(f"[SEC] Errors encountered: {errors}")
 
