@@ -30,6 +30,11 @@ def main():
         f"{python} app/fetchers/yahoo_finance.py",
         continue_on_failure=True,
     )
+    run_step(
+        "Refresh Ticker Market/Earnings Metadata",
+        f"{python} app/fetchers/refresh_earnings_yfinance.py",
+        continue_on_failure=True,
+    )
     run_step("Fetch SEC 8-K Filings", f"{python} app/fetchers/sec_edgar.py")
     run_step("Process SEC Documents", f"{python} app/processors/process_sec_documents.py --window-hours 24")
     run_step("Process Articles", f"{python} app/processors/process_articles.py")

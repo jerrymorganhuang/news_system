@@ -10,7 +10,6 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
-import yfinance as yf
 
 
 # ========= Paths =========
@@ -464,15 +463,6 @@ def safe_text(value):
     return value if value is not None else ""
 
 
-def pct_change(new_value, old_value):
-    try:
-        if new_value is None or old_value in (None, 0):
-            return None
-        return ((new_value / old_value) - 1.0) * 100.0
-    except Exception:
-        return None
-
-
 def format_price(value):
     try:
         if value is None or math.isnan(value):
@@ -676,6 +666,13 @@ def ensure_ticker_metadata_schema(conn):
         """
         CREATE TABLE IF NOT EXISTS ticker_metadata (
             ticker TEXT PRIMARY KEY,
+            price REAL,
+            day_pct REAL,
+            after_pct REAL,
+            week_pct REAL,
+            ytd_pct REAL,
+            market_source TEXT,
+            market_updated_at TEXT,
             next_earnings_date TEXT,
             earnings_time TEXT,
             earnings_source TEXT,
@@ -683,6 +680,23 @@ def ensure_ticker_metadata_schema(conn):
         )
         """
     )
+    existing_columns = {row[1] for row in conn.execute("PRAGMA table_info(ticker_metadata)").fetchall()}
+    required_columns = {
+        "price": "REAL",
+        "day_pct": "REAL",
+        "after_pct": "REAL",
+        "week_pct": "REAL",
+        "ytd_pct": "REAL",
+        "market_source": "TEXT",
+        "market_updated_at": "TEXT",
+        "next_earnings_date": "TEXT",
+        "earnings_time": "TEXT",
+        "earnings_source": "TEXT",
+        "earnings_updated_at": "TEXT",
+    }
+    for name, col_type in required_columns.items():
+        if name not in existing_columns:
+            conn.execute(f"ALTER TABLE ticker_metadata ADD COLUMN {name} {col_type}")
     conn.commit()
 
 
@@ -699,32 +713,6 @@ def get_ticker_earnings(conn, ticker):
     if not row or not row[0]:
         return "N/A"
     return row[0]
-def upsert_ticker_earnings(ticker, next_earnings_date, earnings_time):
-    try:
-        with sqlite3.connect(DB_PATH) as earnings_conn:
-            earnings_conn.execute(
-                """
-                INSERT INTO ticker_metadata (
-                    ticker,
-                    next_earnings_date,
-                    earnings_time,
-                    earnings_source,
-                    earnings_updated_at
-                )
-                VALUES (?, ?, ?, 'yfinance', CURRENT_TIMESTAMP)
-                ON CONFLICT(ticker) DO UPDATE SET
-                    next_earnings_date = excluded.next_earnings_date,
-                    earnings_time = excluded.earnings_time,
-                    earnings_source = excluded.earnings_source,
-                    earnings_updated_at = excluded.earnings_updated_at
-                """,
-                (ticker, next_earnings_date, earnings_time),
-            )
-            earnings_conn.commit()
-    except Exception:
-        pass
-
-
 
 def get_source_map_rows(conn):
     table_columns = set()
@@ -1132,150 +1120,25 @@ def get_articles(conn, ticker, lookback_hours):
 
 
 # ========= Market Data =========
-@st.cache_data(ttl=300, show_spinner=False)
-def get_market_snapshot(ticker):
-    try:
-        tk = yf.Ticker(ticker)
-        hist_1y = tk.history(period="1y", auto_adjust=False, prepost=True)
-
-        next_earnings_date = None
-        earnings_time = None
-        try:
-            calendar = tk.calendar
-            if calendar is not None and not (hasattr(calendar, "empty") and calendar.empty):
-                earnings_value = None
-                if isinstance(calendar, pd.DataFrame):
-                    if "Earnings Date" in calendar.index:
-                        earnings_value = calendar.loc["Earnings Date"].iloc[0]
-                    elif "Earnings Date" in calendar.columns:
-                        earnings_value = calendar["Earnings Date"].iloc[0]
-                if earnings_value is not None and not pd.isna(earnings_value):
-                    earnings_dt = pd.to_datetime(earnings_value, errors="coerce", utc=True)
-                    if not pd.isna(earnings_dt):
-                        next_earnings_date = earnings_dt.strftime("%Y-%m-%d")
-                        if earnings_dt.hour != 0 or earnings_dt.minute != 0 or earnings_dt.second != 0:
-                            earnings_time = earnings_dt.strftime("%H:%M:%S")
-        except Exception:
-            next_earnings_date = None
-            earnings_time = None
-
-        upsert_ticker_earnings(ticker, next_earnings_date, earnings_time)
-
-        if hist_1y is None or hist_1y.empty:
-            return {
-                "price": None,
-                "day_pct": None,
-                "after_pct": None,
-                "week_pct": None,
-                "ytd_pct": None,
-            }
-
-        hist_1y = hist_1y.dropna(subset=["Close"])
-        if hist_1y.empty:
-            return {
-                "price": None,
-                "day_pct": None,
-                "after_pct": None,
-                "week_pct": None,
-                "ytd_pct": None,
-            }
-
-        closes = hist_1y["Close"].tolist()
-        price = closes[-1] if len(closes) >= 1 else None
-        prev_close = closes[-2] if len(closes) >= 2 else None
-        week_close = closes[-6] if len(closes) >= 6 else (closes[0] if closes else None)
-
-        info = {}
-        try:
-            info = tk.fast_info or {}
-        except Exception:
-            info = {}
-
-        previous_close_info = info.get("previous_close", None)
-        last_price_info = info.get("last_price", None)
-
-        day_base = previous_close_info if previous_close_info not in (None, 0) else prev_close
-        day_price = last_price_info if last_price_info not in (None, 0) else price
-        day_pct = pct_change(day_price, day_base)
-
-        regular_market = None
-        post_market = None
-        pre_market = None
-        post_market_pct = None
-        pre_market_pct = None
-
-        try:
-            regular_market = info.get("regular_market_price", None)
-        except Exception:
-            regular_market = None
-
-        try:
-            post_market = info.get("post_market_price", None)
-        except Exception:
-            post_market = None
-
-        try:
-            pre_market = info.get("pre_market_price", None)
-        except Exception:
-            pre_market = None
-
-        if post_market in (None, 0) and pre_market in (None, 0):
-            info_ext = {}
-            try:
-                info_ext = tk.info or {}
-            except Exception:
-                info_ext = {}
-
-            post_market = info_ext.get("postMarketPrice", None)
-            post_market_pct = info_ext.get("postMarketChangePercent", None)
-            pre_market = info_ext.get("preMarketPrice", None)
-            pre_market_pct = info_ext.get("preMarketChangePercent", None)
-
-        after_pct = None
-        if post_market not in (None, 0):
-            if post_market_pct is not None:
-                after_pct = post_market_pct
-            elif regular_market not in (None, 0):
-                after_pct = pct_change(post_market, regular_market)
-        elif pre_market not in (None, 0):
-            if pre_market_pct is not None:
-                after_pct = pre_market_pct
-            elif regular_market not in (None, 0):
-                after_pct = pct_change(pre_market, regular_market)
-
-        week_pct = pct_change(price, week_close)
-
-        dt_index = hist_1y.index
-        current_year = datetime.utcnow().year
-        ytd_base = None
-
-        for idx, dt_val in enumerate(dt_index):
-            py_dt = dt_val.to_pydatetime() if hasattr(dt_val, "to_pydatetime") else dt_val
-            if py_dt.year == current_year:
-                ytd_base = closes[idx]
-                break
-
-        if ytd_base is None and len(closes) > 0:
-            ytd_base = closes[0]
-
-        ytd_pct = pct_change(price, ytd_base)
-
-        return {
-            "price": day_price if day_price is not None else price,
-            "day_pct": day_pct,
-            "after_pct": after_pct,
-            "week_pct": week_pct,
-            "ytd_pct": ytd_pct,
-        }
-
-    except Exception:
-        return {
-            "price": None,
-            "day_pct": None,
-            "after_pct": None,
-            "week_pct": None,
-            "ytd_pct": None,
-        }
+def get_market_snapshot(conn, ticker):
+    row = conn.execute(
+        """
+        SELECT price, day_pct, after_pct, week_pct, ytd_pct
+        FROM ticker_metadata
+        WHERE ticker = ?
+        LIMIT 1
+        """,
+        (ticker,),
+    ).fetchone()
+    if not row:
+        return {"price": None, "day_pct": None, "after_pct": None, "week_pct": None, "ytd_pct": None}
+    return {
+        "price": row[0],
+        "day_pct": row[1],
+        "after_pct": row[2],
+        "week_pct": row[3],
+        "ytd_pct": row[4],
+    }
 
 
 def build_dashboard_rows(conn, window_hours):
@@ -1288,7 +1151,7 @@ def build_dashboard_rows(conn, window_hours):
         digest = get_company_digest(conn, ticker, window_hours)
         article_count = get_article_count(conn, ticker, window_hours)
         articles_df = get_articles(conn, ticker, window_hours)
-        market = get_market_snapshot(ticker)
+        market = get_market_snapshot(conn, ticker)
 
         results.append({
             "ticker": ticker,
