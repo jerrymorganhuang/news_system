@@ -42,6 +42,7 @@ ALLOWED_SOURCES = {
     "Business Wire",
     "GlobeNewswire",
     "PR Newswire",
+    "Investing.com",
 }
 
 # 黑名單關鍵字：常見垃圾站 / 地區站 / 聚合站
@@ -71,7 +72,6 @@ BLOCKED_SOURCE_KEYWORDS = [
     "msn",
     "aol",
     "newsbreak",
-    "investing.com",
     "streetinsider",
     "fool",
     "motley fool",

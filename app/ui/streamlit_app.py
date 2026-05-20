@@ -497,7 +497,7 @@ def format_pct_html(value):
     return f'<span class="{cls}">{sign}{value:.1f}%</span>'
 
 
-def build_company_header_html(ticker, price_html, day_html, after_html, week_html, ytd_html, article_count):
+def build_company_header_html(ticker, price_html, day_html, after_html, week_html, ytd_html, article_count, earnings_text):
     return (
         '<div class="company-block">'
         '<div class="company-header">'
@@ -508,6 +508,7 @@ def build_company_header_html(ticker, price_html, day_html, after_html, week_htm
         f'<span class="sep">|</span><span class="stat-label">5D</span> {week_html}'
         f'<span class="sep">|</span><span class="stat-label">YTD</span> {ytd_html}'
         f'<span class="sep">|</span><span class="news-count">News {article_count}</span>'
+        f'<span class="sep">|</span><span class="stat-label">Earnings {earnings_text}</span>'
         '</div>'
         '</div>'
     )
@@ -665,6 +666,64 @@ def ensure_ticker_source_map_schema(conn):
         """
     )
     conn.commit()
+
+
+
+
+def ensure_ticker_metadata_schema(conn):
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ticker_metadata (
+            ticker TEXT PRIMARY KEY,
+            next_earnings_date TEXT,
+            earnings_time TEXT,
+            earnings_source TEXT,
+            earnings_updated_at TEXT
+        )
+        """
+    )
+    conn.commit()
+
+
+def get_ticker_earnings(conn, ticker):
+    row = conn.execute(
+        """
+        SELECT next_earnings_date
+        FROM ticker_metadata
+        WHERE ticker = ?
+        LIMIT 1
+        """,
+        (ticker,),
+    ).fetchone()
+    if not row or not row[0]:
+        return "N/A"
+    return row[0]
+def upsert_ticker_earnings(ticker, next_earnings_date, earnings_time):
+    try:
+        with sqlite3.connect(DB_PATH) as earnings_conn:
+            earnings_conn.execute(
+                """
+                INSERT INTO ticker_metadata (
+                    ticker,
+                    next_earnings_date,
+                    earnings_time,
+                    earnings_source,
+                    earnings_updated_at
+                )
+                VALUES (?, ?, ?, 'yfinance', CURRENT_TIMESTAMP)
+                ON CONFLICT(ticker) DO UPDATE SET
+                    next_earnings_date = excluded.next_earnings_date,
+                    earnings_time = excluded.earnings_time,
+                    earnings_source = excluded.earnings_source,
+                    earnings_updated_at = excluded.earnings_updated_at
+                """,
+                (ticker, next_earnings_date, earnings_time),
+            )
+            earnings_conn.commit()
+    except Exception:
+        pass
+
 
 
 def get_source_map_rows(conn):
@@ -1079,6 +1138,29 @@ def get_market_snapshot(ticker):
         tk = yf.Ticker(ticker)
         hist_1y = tk.history(period="1y", auto_adjust=False, prepost=True)
 
+        next_earnings_date = None
+        earnings_time = None
+        try:
+            calendar = tk.calendar
+            if calendar is not None and not (hasattr(calendar, "empty") and calendar.empty):
+                earnings_value = None
+                if isinstance(calendar, pd.DataFrame):
+                    if "Earnings Date" in calendar.index:
+                        earnings_value = calendar.loc["Earnings Date"].iloc[0]
+                    elif "Earnings Date" in calendar.columns:
+                        earnings_value = calendar["Earnings Date"].iloc[0]
+                if earnings_value is not None and not pd.isna(earnings_value):
+                    earnings_dt = pd.to_datetime(earnings_value, errors="coerce", utc=True)
+                    if not pd.isna(earnings_dt):
+                        next_earnings_date = earnings_dt.strftime("%Y-%m-%d")
+                        if earnings_dt.hour != 0 or earnings_dt.minute != 0 or earnings_dt.second != 0:
+                            earnings_time = earnings_dt.strftime("%H:%M:%S")
+        except Exception:
+            next_earnings_date = None
+            earnings_time = None
+
+        upsert_ticker_earnings(ticker, next_earnings_date, earnings_time)
+
         if hist_1y is None or hist_1y.empty:
             return {
                 "price": None,
@@ -1338,6 +1420,7 @@ try:
     ensure_ticker_source_map_schema(conn)
     ensure_sec_filings_schema(conn)
     ensure_sec_phase2_schema(conn)
+    ensure_ticker_metadata_schema(conn)
 
     watchlist_rows = get_watchlist_rows(conn)
     watchlist_tickers = sorted([row["ticker"] for row in watchlist_rows])
@@ -1378,6 +1461,7 @@ try:
         success = run_pipeline_with_progress()
         if success:
             st.rerun()
+
 
     if refresh_clicked:
         st.rerun()
@@ -1600,6 +1684,7 @@ try:
             week_html = format_pct_html(row["week_pct"])
             ytd_html = format_pct_html(row["ytd_pct"])
 
+            earnings_text = get_ticker_earnings(conn, ticker)
             header_html = build_company_header_html(
                 ticker=ticker,
                 price_html=price_html,
@@ -1608,6 +1693,7 @@ try:
                 week_html=week_html,
                 ytd_html=ytd_html,
                 article_count=article_count,
+                earnings_text=earnings_text,
             )
             st.markdown(header_html, unsafe_allow_html=True)
 

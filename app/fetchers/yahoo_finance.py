@@ -49,6 +49,7 @@ ALLOWED_SOURCES = {
     "Business Wire",
     "GlobeNewswire",
     "PR Newswire",
+    "Investing.com",
 }
 
 BLOCKED_SOURCE_KEYWORDS = [
@@ -77,7 +78,6 @@ BLOCKED_SOURCE_KEYWORDS = [
     "msn",
     "aol",
     "newsbreak",
-    "investing.com",
     "streetinsider",
     "insider monkey",
     "simply wall st",

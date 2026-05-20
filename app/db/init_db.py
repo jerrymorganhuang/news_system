@@ -95,6 +95,17 @@ def init_db():
     )
     """)
 
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS ticker_metadata (
+        ticker TEXT PRIMARY KEY,
+        next_earnings_date TEXT,
+        earnings_time TEXT,
+        earnings_source TEXT,
+        earnings_updated_at TEXT
+    )
+    """)
+
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS sec_filings (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
