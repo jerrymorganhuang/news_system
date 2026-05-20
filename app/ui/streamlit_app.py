@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
+import yfinance as yf
 
 
 # ========= Paths =========
@@ -1141,6 +1142,65 @@ def get_market_snapshot(conn, ticker):
     }
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def get_live_ext_pct(ticker):
+    try:
+        tk = yf.Ticker(ticker)
+        info = {}
+        try:
+            info = tk.fast_info or {}
+        except Exception:
+            info = {}
+
+        regular_market = None
+        post_market = None
+        pre_market = None
+        post_market_pct = None
+        pre_market_pct = None
+
+        try:
+            regular_market = info.get("regular_market_price", None)
+        except Exception:
+            regular_market = None
+
+        try:
+            post_market = info.get("post_market_price", None)
+        except Exception:
+            post_market = None
+
+        try:
+            pre_market = info.get("pre_market_price", None)
+        except Exception:
+            pre_market = None
+
+        if post_market in (None, 0) and pre_market in (None, 0):
+            info_ext = {}
+            try:
+                info_ext = tk.info or {}
+            except Exception:
+                info_ext = {}
+
+            post_market = info_ext.get("postMarketPrice", None)
+            post_market_pct = info_ext.get("postMarketChangePercent", None)
+            pre_market = info_ext.get("preMarketPrice", None)
+            pre_market_pct = info_ext.get("preMarketChangePercent", None)
+
+        if post_market not in (None, 0):
+            if post_market_pct is not None:
+                return post_market_pct
+            if regular_market not in (None, 0):
+                return pct_change(post_market, regular_market)
+        elif pre_market not in (None, 0):
+            if pre_market_pct is not None:
+                return pre_market_pct
+            if regular_market not in (None, 0):
+                return pct_change(pre_market, regular_market)
+
+        return None
+    except Exception:
+        return None
+
+
 def build_dashboard_rows(conn, window_hours):
     watchlist_rows = get_watchlist_rows(conn)
     results = []
@@ -1543,7 +1603,9 @@ try:
 
             price_html = format_price(row["price"])
             day_html = format_pct_html(row["day_pct"])
-            after_html = format_pct_html(row["after_pct"])
+            live_after_pct = get_live_ext_pct(ticker)
+            effective_after_pct = live_after_pct if live_after_pct is not None else row["after_pct"]
+            after_html = format_pct_html(effective_after_pct)
             week_html = format_pct_html(row["week_pct"])
             ytd_html = format_pct_html(row["ytd_pct"])
 
