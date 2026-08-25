@@ -1,5 +1,7 @@
 import subprocess
 import sys
+import argparse
+from datetime import date
 
 
 def run_step(name, command, continue_on_failure=False):
@@ -18,7 +20,11 @@ def run_step(name, command, continue_on_failure=False):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Run the daily news pipeline")
+    parser.add_argument("--report-date", type=date.fromisoformat, default=None)
+    args = parser.parse_args()
     python = sys.executable
+    report_arg = f" --report-date {args.report_date.isoformat()}" if args.report_date else ""
 
     run_step(
         "Fetch Google News",
@@ -40,7 +46,7 @@ def main():
     run_step("Process Articles", f"{python} app/processors/process_articles.py")
     run_step(
         "Generate Company Summaries",
-        f"{python} app/summarizers/summarize_by_company.py",
+        f"{python} app/summarizers/summarize_by_company.py{report_arg}",
     )
 
     print("All steps completed successfully.")

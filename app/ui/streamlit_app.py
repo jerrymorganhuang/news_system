@@ -2,7 +2,6 @@ import os
 import sys
 import math
 import json
-import re
 import sqlite3
 import subprocess
 from datetime import datetime, timezone, timedelta
@@ -11,6 +10,13 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import streamlit as st
 import yfinance as yf
+
+from app.db.company_digest_schema import (
+    available_report_dates,
+    default_report_date,
+    ensure_company_digest_schema as migrate_company_digest_schema,
+)
+from app.db.sec_dashboard import get_sec_summary_and_rows
 
 
 # ========= Paths =========
@@ -826,78 +832,11 @@ def save_source_map_rows(conn, source_map_df):
 
 # ========= Digest / Articles =========
 def ensure_company_digest_schema(conn):
-    cursor = conn.cursor()
-    table_exists = cursor.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='company_digest' LIMIT 1"
-    ).fetchone()
+    migrate_company_digest_schema(conn)
 
-    if not table_exists:
-        cursor.execute(
-            """
-            CREATE TABLE company_digest (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ticker TEXT NOT NULL,
-                window_hours INTEGER NOT NULL,
-                window_start TEXT NOT NULL,
-                window_end TEXT NOT NULL,
-                article_count INTEGER DEFAULT 0,
-                summary TEXT,
-                generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(ticker, window_hours)
-            )
-            """
-        )
-        conn.commit()
-        return
 
-    cursor.execute("PRAGMA table_info(company_digest)")
-    columns = {row[1] for row in cursor.fetchall()}
-    if "window_hours" not in columns:
-        cursor.execute("ALTER TABLE company_digest RENAME TO company_digest_legacy")
-        cursor.execute(
-            """
-            CREATE TABLE company_digest (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ticker TEXT NOT NULL,
-                window_hours INTEGER NOT NULL,
-                window_start TEXT NOT NULL,
-                window_end TEXT NOT NULL,
-                article_count INTEGER DEFAULT 0,
-                summary TEXT,
-                generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(ticker, window_hours)
-            )
-            """
-        )
-        cursor.execute(
-            """
-            INSERT INTO company_digest (
-                ticker,
-                window_hours,
-                window_start,
-                window_end,
-                article_count,
-                summary,
-                generated_at
-            )
-            SELECT
-                ticker,
-                48 AS window_hours,
-                COALESCE(window_start, datetime('now', '-48 hours')),
-                COALESCE(window_end, datetime('now')),
-                COALESCE(article_count, 0),
-                summary,
-                COALESCE(generated_at, CURRENT_TIMESTAMP)
-            FROM company_digest_legacy
-            """
-        )
-        cursor.execute("DROP TABLE company_digest_legacy")
-
-    cursor.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_company_digest_ticker_window "
-        "ON company_digest(ticker, window_hours)"
-    )
-    conn.commit()
+def get_available_report_dates(conn):
+    return available_report_dates(conn)
 
 
 def ensure_sec_filings_schema(conn):
@@ -981,143 +920,24 @@ def ensure_sec_phase2_schema(conn):
     conn.commit()
 
 
-def get_sec_summary_and_rows(conn, ticker, window_hours):
-    accepted_expr = (
-        "CASE "
-        "WHEN length(sf.accepted_datetime)=14 THEN "
-        "substr(sf.accepted_datetime,1,4)||'-'||substr(sf.accepted_datetime,5,2)||'-'||substr(sf.accepted_datetime,7,2)||' '||"
-        "substr(sf.accepted_datetime,9,2)||':'||substr(sf.accepted_datetime,11,2)||':'||substr(sf.accepted_datetime,13,2) "
-        "ELSE sf.accepted_datetime END"
-    )
-
-    digest = conn.execute(
-        """
-        SELECT summary_zh, generated_at
-        FROM sec_digest
-        WHERE ticker = ?
-          AND window_hours = ?
-        ORDER BY generated_at DESC
-        LIMIT 1
-        """,
-        (ticker, window_hours),
-    ).fetchone()
-
-    document_time_expr = f"COALESCE({accepted_expr}, sf.filing_date, sd.fetched_at)"
-    document_rows = conn.execute(
-        f"""
-        SELECT
-            {document_time_expr} AS accepted_at,
-            sd.document_type,
-            COALESCE(NULLIF(sd.document_title, ''), sd.document_url) AS document_title,
-            sd.document_url
-        FROM sec_documents sd
-        LEFT JOIN sec_filings sf ON sf.id = sd.filing_id
-        WHERE sd.ticker = ?
-          AND datetime({document_time_expr}) >= datetime(?)
-        ORDER BY
-            datetime({document_time_expr}) DESC,
-            CASE sd.document_type WHEN 'EX-99.1' THEN 0 WHEN 'EX-99.2' THEN 1 WHEN '8-K' THEN 2 ELSE 9 END,
-            sd.id DESC
-        """,
-        (ticker, cutoff_str(window_hours)),
-    ).fetchall()
-
-    summary = ""
-    generated_at = ""
-    if digest:
-        summary = (digest[0] or "").strip()
-        summary = re.sub(r"\n?\[fp:[0-9a-f]{64}\]\s*$", "", summary)
-        generated_at = digest[1] or ""
-
-    return {
-        "summary": summary,
-        "generated_at": generated_at,
-        "document_rows": document_rows,
-    }
+def get_company_digest(conn, ticker, report_date):
+    row = conn.execute("""SELECT summary, generated_at, window_start, window_end, article_count
+        FROM company_digest WHERE ticker=? AND report_date=? LIMIT 1""",
+        (ticker, report_date)).fetchone()
+    if not row:
+        return {"summary": "", "generated_at": "", "window_start": "", "window_end": "", "article_count": 0}
+    return {"summary": row[0] or "", "generated_at": row[1] or "", "window_start": row[2], "window_end": row[3], "article_count": row[4] or 0}
 
 
-def get_company_digest(conn, ticker, window_hours):
-    candidate_queries = [
-        """
-        SELECT summary, generated_at
-        FROM company_digest
-        WHERE ticker = ?
-          AND window_hours = ?
-        ORDER BY generated_at DESC
-        LIMIT 1
-        """,
-        """
-        SELECT digest, generated_at
-        FROM company_digest
-        WHERE ticker = ?
-          AND window_hours = ?
-        ORDER BY generated_at DESC
-        LIMIT 1
-        """,
-        """
-        SELECT ai_summary, generated_at
-        FROM company_digest
-        WHERE ticker = ?
-          AND window_hours = ?
-        ORDER BY generated_at DESC
-        LIMIT 1
-        """
-    ]
-
-    for query in candidate_queries:
-        try:
-            row = conn.execute(query, (ticker, window_hours)).fetchone()
-            if row:
-                return {
-                    "summary": row[0] or "",
-                    "generated_at": row[1] or ""
-                }
-        except Exception:
-            continue
-
-    return {
-        "summary": "",
-        "generated_at": ""
-    }
-
-
-def get_article_count(conn, ticker, lookback_hours):
-    query = """
-        SELECT COUNT(*)
-        FROM articles
-        WHERE ticker = ?
+def get_articles(conn, ticker, window_start, window_end):
+    rows = conn.execute("""SELECT ticker, COALESCE(published_at, fetched_at), source, title, url
+        FROM articles WHERE ticker=?
           AND datetime(COALESCE(published_at, fetched_at)) >= datetime(?)
-    """
-    row = conn.execute(query, (ticker, cutoff_str(lookback_hours))).fetchone()
-    return row[0] if row else 0
-
-
-def get_articles(conn, ticker, lookback_hours):
-    query = """
-        SELECT
-            ticker,
-            COALESCE(published_at, fetched_at) as article_time,
-            source,
-            title,
-            url
-        FROM articles
-        WHERE ticker = ?
-          AND datetime(COALESCE(published_at, fetched_at)) >= datetime(?)
-        ORDER BY datetime(COALESCE(published_at, fetched_at)) DESC
-    """
-    rows = conn.execute(query, (ticker, cutoff_str(lookback_hours))).fetchall()
-
-    data = []
-    for row in rows:
-        data.append({
-            "ticker": row[0],
-            "published_at": format_time(row[1]),
-            "source": row[2] or "",
-            "title": row[3] or "",
-            "url": row[4] or ""
-        })
-
-    return pd.DataFrame(data)
+          AND datetime(COALESCE(published_at, fetched_at)) < datetime(?)
+        ORDER BY datetime(COALESCE(published_at, fetched_at)) DESC""",
+        (ticker, window_start, window_end)).fetchall()
+    return pd.DataFrame([{"ticker": r[0], "published_at": format_time(r[1]), "source": r[2] or "",
+                          "title": r[3] or "", "url": r[4] or ""} for r in rows])
 
 
 # ========= Market Data =========
@@ -1201,16 +1021,16 @@ def get_live_ext_pct(ticker):
         return None
 
 
-def build_dashboard_rows(conn, window_hours):
+def build_dashboard_rows(conn, report_date):
     watchlist_rows = get_watchlist_rows(conn)
     results = []
 
     for item in watchlist_rows:
         ticker = item["ticker"]
         company_name = item["company_name"] or ticker
-        digest = get_company_digest(conn, ticker, window_hours)
-        article_count = get_article_count(conn, ticker, window_hours)
-        articles_df = get_articles(conn, ticker, window_hours)
+        digest = get_company_digest(conn, ticker, report_date)
+        article_count = digest["article_count"]
+        articles_df = get_articles(conn, ticker, digest["window_start"], digest["window_end"]) if digest["window_start"] else pd.DataFrame()
         market = get_market_snapshot(conn, ticker)
 
         results.append({
@@ -1226,6 +1046,8 @@ def build_dashboard_rows(conn, window_hours):
             "after_pct": market["after_pct"],
             "week_pct": market["week_pct"],
             "ytd_pct": market["ytd_pct"],
+            "window_start": digest["window_start"],
+            "window_end": digest["window_end"],
         })
 
     return results
@@ -1260,13 +1082,13 @@ def run_python_script(script_path, args=None):
         return False, str(e)
 
 
-def run_pipeline_with_progress():
+def run_pipeline_with_progress(report_date):
     steps = [
         ("Step 1/5 - Fetching news", FETCH_SCRIPT_PATH),
         ("Step 2/5 - Fetching SEC 8-K", SEC_FETCH_SCRIPT_PATH),
         ("Step 3/5 - Processing SEC documents", SEC_PROCESS_SCRIPT_PATH, ["--window-hours", "24"]),
         ("Step 4/5 - Processing articles", PROCESS_SCRIPT_PATH),
-        ("Step 5/5 - Generating AI summaries", SUMMARIZE_SCRIPT_PATH, ["--window-hours", "24"]),
+        ("Step 5/5 - Generating AI summaries", SUMMARIZE_SCRIPT_PATH, ["--report-date", report_date]),
     ]
 
     progress_placeholder = st.sidebar.empty()
@@ -1354,13 +1176,12 @@ try:
         value=False
     )
 
-    window_label = st.sidebar.selectbox(
-        "News Window",
-        options=["24h", "48h"],
-        index=0,
-        label_visibility="collapsed",
+    available_dates = get_available_report_dates(conn)
+    if not available_dates:
+        available_dates = [default_report_date().isoformat()]
+    selected_report_date = st.sidebar.selectbox(
+        "As-of Date", options=available_dates, index=0
     )
-    selected_window_hours = int(window_label.replace("h", ""))
 
     sort_option = st.sidebar.selectbox(
         "Sort",
@@ -1381,7 +1202,7 @@ try:
         reset_clicked = st.button("Reset", use_container_width=True)
 
     if run_clicked:
-        success = run_pipeline_with_progress()
+        success = run_pipeline_with_progress(selected_report_date)
         if success:
             st.rerun()
 
@@ -1390,7 +1211,7 @@ try:
         st.rerun()
 
     confirm_reset = st.sidebar.checkbox(
-        "I understand this will clear generated News and SEC data, while preserving Watchlist and Source Mapping.",
+        "I understand this permanently deletes all articles, SEC data, and all historical daily snapshots, while preserving Watchlist and Source Mapping.",
         value=False,
         key="confirm_reset_database"
     )
@@ -1558,16 +1379,11 @@ try:
                     st.success(f"Deleted {deleted_count} ticker(s) from watchlist and ticker mappings.")
                     st.rerun()
     else:
-        st.title(f"{selected_window_hours}h Company News Dashboard")
-
-        if watchlist_tickers:
-            with st.spinner(f"Ensuring {selected_window_hours}h digests..."):
-                run_python_script(
-                    SUMMARIZE_SCRIPT_PATH, args=["--window-hours", str(selected_window_hours)]
-                )
+        st.title("Company News Dashboard")
+        st.caption(f"As-of Date: {selected_report_date}")
 
         # ----- Main -----
-        dashboard_rows = build_dashboard_rows(conn, selected_window_hours)
+        dashboard_rows = build_dashboard_rows(conn, selected_report_date)
 
         if hide_empty:
             dashboard_rows = [row for row in dashboard_rows if row["has_data"]]
@@ -1588,7 +1404,7 @@ try:
         overview_col1.metric("Displayed tickers", len(dashboard_rows))
         overview_col2.metric("Tickers with data", sum(1 for row in dashboard_rows if row["has_data"]))
         overview_col3.metric(
-            f"Articles ({selected_window_hours}h)",
+            f"Articles · {selected_report_date}",
             sum(row["article_count"] for row in dashboard_rows),
         )
 
@@ -1622,11 +1438,11 @@ try:
             )
             st.markdown(header_html, unsafe_allow_html=True)
 
-            summary_label = f"AI Summary · {selected_window_hours}h"
+            summary_label = f"AI Summary · {selected_report_date}"
             if generated_at:
                 updated_label = format_digest_updated_time(generated_at)
                 if updated_label:
-                    summary_label = f"AI Summary · {selected_window_hours}h · Updated: {updated_label}"
+                    summary_label = f"AI Summary · {selected_report_date} · Updated: {updated_label}"
 
             st.markdown(
                 f'<div class="summary-label">{summary_label}</div>',
@@ -1657,9 +1473,9 @@ try:
                     )
 
             try:
-                sec_state = get_sec_summary_and_rows(conn, ticker, selected_window_hours)
+                sec_state = get_sec_summary_and_rows(conn, ticker, row["window_start"], row["window_end"])
 
-                sec_summary_label = f"SEC 8-K Summary · {selected_window_hours}h"
+                sec_summary_label = f"SEC 8-K Summary · {selected_report_date}"
                 if sec_state["generated_at"]:
                     updated_label = format_digest_updated_time(sec_state["generated_at"])
                     if updated_label:
