@@ -12,7 +12,6 @@ import streamlit as st
 import yfinance as yf
 
 from app.db.company_digest_schema import (
-    available_report_dates,
     default_report_date,
     ensure_company_digest_schema as migrate_company_digest_schema,
 )
@@ -38,6 +37,7 @@ WATCHLIST_CHIPS_PER_ROW = 4
 # ========= Page Config =========
 st.set_page_config(
     page_title="Company News Intelligence",
+    page_icon="📰",
     layout="wide"
 )
 
@@ -835,10 +835,6 @@ def ensure_company_digest_schema(conn):
     migrate_company_digest_schema(conn)
 
 
-def get_available_report_dates(conn):
-    return available_report_dates(conn)
-
-
 def ensure_sec_filings_schema(conn):
     cursor = conn.cursor()
     cursor.execute(
@@ -1053,6 +1049,11 @@ def build_dashboard_rows(conn, report_date):
     return results
 
 
+def should_hide_dashboard_row(row):
+    summary = row["summary"] or ""
+    return row["article_count"] == 0 or summary.strip().startswith("來源內容無重大消息")
+
+
 # ========= Script Runner =========
 def run_python_script(script_path, args=None):
     if not os.path.exists(script_path):
@@ -1173,15 +1174,13 @@ try:
     # ----- Sidebar -----
     hide_empty = st.sidebar.checkbox(
         "Hide tickers with no data",
-        value=False
+        value=True
     )
 
-    available_dates = get_available_report_dates(conn)
-    if not available_dates:
-        available_dates = [default_report_date().isoformat()]
-    selected_report_date = st.sidebar.selectbox(
-        "As-of Date", options=available_dates, index=0
-    )
+    selected_report_date = st.sidebar.date_input(
+        "As-of Date",
+        value=default_report_date(),
+    ).isoformat()
 
     sort_option = st.sidebar.selectbox(
         "Sort",
@@ -1386,7 +1385,7 @@ try:
         dashboard_rows = build_dashboard_rows(conn, selected_report_date)
 
         if hide_empty:
-            dashboard_rows = [row for row in dashboard_rows if row["has_data"]]
+            dashboard_rows = [row for row in dashboard_rows if not should_hide_dashboard_row(row)]
 
         if sort_option == "Sort by Ticker A-Z":
             dashboard_rows = sorted(dashboard_rows, key=lambda x: x["ticker"])
@@ -1396,10 +1395,6 @@ try:
                 key=lambda x: (-x["article_count"], x["ticker"])
             )
 
-        if not dashboard_rows:
-            st.info("No rows to display.")
-            st.stop()
-
         overview_col1, overview_col2, overview_col3 = st.columns(3)
         overview_col1.metric("Displayed tickers", len(dashboard_rows))
         overview_col2.metric("Tickers with data", sum(1 for row in dashboard_rows if row["has_data"]))
@@ -1407,6 +1402,10 @@ try:
             f"Articles · {selected_report_date}",
             sum(row["article_count"] for row in dashboard_rows),
         )
+
+        if not dashboard_rows:
+            st.info("No rows to display.")
+            st.stop()
 
         st.markdown("---")
 

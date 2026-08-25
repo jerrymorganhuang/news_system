@@ -1,4 +1,5 @@
 from datetime import date, datetime, timezone
+import ast
 import sqlite3
 import sys
 import types
@@ -65,3 +66,31 @@ def test_dashboard_is_read_only_and_preserves_admin_features():
     assert "As-of Date" in source and "News Window" not in source
     for feature in ("Ticker Admin", "Save Changes", "Delete Selected", "Refresh SEC", "Hide tickers with no data"):
         assert feature in source
+
+
+def test_dashboard_uses_calendar_date_and_newspaper_icon():
+    source = Path("app/ui/streamlit_app.py").read_text()
+    assert 'page_icon="📰"' in source
+    assert "st.sidebar.date_input(" in source
+    assert 'value=default_report_date()' in source
+    assert 'st.sidebar.selectbox(\n        "As-of Date"' not in source
+
+
+def test_hide_empty_filter_includes_article_count_and_summary_prefix():
+    source = Path("app/ui/streamlit_app.py").read_text()
+    tree = ast.parse(source)
+    function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "should_hide_dashboard_row"
+    )
+    namespace = {}
+    exec(compile(ast.Module(body=[function], type_ignores=[]), "<dashboard-filter>", "exec"), namespace)
+    should_hide = namespace["should_hide_dashboard_row"]
+
+    assert should_hide({"article_count": 0, "summary": "A normal summary"})
+    assert should_hide({"article_count": 5, "summary": "來源內容無重大消息"})
+    assert should_hide({"article_count": 5, "summary": "  來源內容無重大消息。近期新聞主要..."})
+    assert not should_hide({"article_count": 5, "summary": "A normal summary"})
+    assert '"Hide tickers with no data",\n        value=True' in source
+    assert "if hide_empty:" in source
