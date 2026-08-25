@@ -1,440 +1,147 @@
-import os
 import argparse
+import os
 import sqlite3
-from datetime import datetime, timedelta, timezone
+import sys
+from datetime import date
 from pathlib import Path
 from typing import List, Optional, Tuple
+
+BASE_DIR = Path(__file__).resolve().parents[2]
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
 
 from dotenv import load_dotenv
 from openai import OpenAI
 
-# ===== 基本設定 =====
-BASE_DIR = Path(__file__).resolve().parents[2]
+from app.db.company_digest_schema import (
+    daily_window,
+    default_report_date,
+    ensure_company_digest_schema,
+    utc_sql_timestamp,
+)
+
 ENV_PATH = BASE_DIR / ".env"
 DB_PATH = BASE_DIR / "data" / "news.db"
-
-# 載入 .env
 load_dotenv(ENV_PATH)
-
 MODEL = "gpt-5-mini"
 MAX_ARTICLES_PER_TICKER = 20
 MAX_CONTENT_CHARS = 1800
-DEFAULT_LOOKBACK_HOURS = 24
-SUPPORTED_WINDOWS = {24, 48}
 
 
 def get_openai_client() -> OpenAI:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
-        raise RuntimeError(
-            f"OPENAI_API_KEY not found. Please create {ENV_PATH} and add:\n"
-            f"OPENAI_API_KEY=sk-..."
-        )
+        raise RuntimeError(f"OPENAI_API_KEY not found. Please add it to {ENV_PATH}")
     return OpenAI(api_key=api_key)
 
 
 def get_db_connection() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
-    return conn
+    return sqlite3.connect(DB_PATH)
 
 
-def ensure_company_digest_schema(conn: sqlite3.Connection) -> None:
-    cursor = conn.cursor()
-
-    table_exists = cursor.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='company_digest' LIMIT 1"
-    ).fetchone()
-
-    if not table_exists:
-        cursor.execute(
-            """
-            CREATE TABLE company_digest (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ticker TEXT NOT NULL,
-                window_hours INTEGER NOT NULL,
-                window_start TEXT NOT NULL,
-                window_end TEXT NOT NULL,
-                article_count INTEGER DEFAULT 0,
-                summary TEXT,
-                generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(ticker, window_hours)
-            )
-            """
-        )
-        conn.commit()
-        return
-
-    cursor.execute("PRAGMA table_info(company_digest)")
-    columns = {row[1] for row in cursor.fetchall()}
-
-    needs_migration = "window_hours" not in columns
-    if not needs_migration:
-        cursor.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_company_digest_ticker_window "
-            "ON company_digest(ticker, window_hours)"
-        )
-        conn.commit()
-        return
-
-    cursor.execute("ALTER TABLE company_digest RENAME TO company_digest_legacy")
-    cursor.execute(
-        """
-        CREATE TABLE company_digest (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ticker TEXT NOT NULL,
-            window_hours INTEGER NOT NULL,
-            window_start TEXT NOT NULL,
-            window_end TEXT NOT NULL,
-            article_count INTEGER DEFAULT 0,
-            summary TEXT,
-            generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(ticker, window_hours)
-        )
-        """
-    )
-    cursor.execute(
-        """
-        INSERT INTO company_digest (
-            ticker,
-            window_hours,
-            window_start,
-            window_end,
-            article_count,
-            summary,
-            generated_at
-        )
-        SELECT
-            ticker,
-            48 AS window_hours,
-            COALESCE(window_start, datetime('now', '-48 hours')) AS window_start,
-            COALESCE(window_end, datetime('now')) AS window_end,
-            COALESCE(article_count, 0) AS article_count,
-            summary,
-            COALESCE(generated_at, CURRENT_TIMESTAMP) AS generated_at
-        FROM company_digest_legacy
-        """
-    )
-    cursor.execute("DROP TABLE company_digest_legacy")
-    cursor.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_company_digest_ticker_window "
-        "ON company_digest(ticker, window_hours)"
-    )
-    conn.commit()
-
-
-def get_recent_tickers(conn: sqlite3.Connection, lookback_hours: int) -> List[str]:
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT DISTINCT ticker
-        FROM articles
-        WHERE datetime(COALESCE(published_at, fetched_at)) >= datetime('now', ?)
-        ORDER BY ticker
-        """,
-        (f"-{lookback_hours} hours",),
-    )
-    rows = cursor.fetchall()
+def get_recent_tickers(conn: sqlite3.Connection, window_start: str, window_end: str) -> List[str]:
+    rows = conn.execute(
+        """SELECT DISTINCT ticker FROM articles
+           WHERE datetime(COALESCE(published_at, fetched_at)) >= datetime(?)
+             AND datetime(COALESCE(published_at, fetched_at)) < datetime(?)
+           ORDER BY ticker""",
+        (window_start, window_end),
+    ).fetchall()
     return [row[0] for row in rows]
 
 
-def get_all_digest_tickers(conn: sqlite3.Connection, lookback_hours: int) -> List[str]:
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT ticker FROM company_digest WHERE window_hours = ?",
-        (lookback_hours,),
-    )
-    return [row[0] for row in cursor.fetchall()]
+def get_articles_for_ticker(conn: sqlite3.Connection, ticker: str, window_start: str, window_end: str) -> List[Tuple]:
+    return conn.execute(
+        """SELECT title, source, published_at, content, url FROM articles
+           WHERE ticker = ?
+             AND datetime(COALESCE(published_at, fetched_at)) >= datetime(?)
+             AND datetime(COALESCE(published_at, fetched_at)) < datetime(?)
+           ORDER BY datetime(COALESCE(published_at, fetched_at)) DESC LIMIT ?""",
+        (ticker, window_start, window_end, MAX_ARTICLES_PER_TICKER),
+    ).fetchall()
 
 
-def delete_digest_for_ticker(conn: sqlite3.Connection, ticker: str, lookback_hours: int) -> None:
-    cursor = conn.cursor()
-    cursor.execute(
-        "DELETE FROM company_digest WHERE ticker = ? AND window_hours = ?",
-        (ticker, lookback_hours),
-    )
-    conn.commit()
-
-
-def get_articles_for_ticker(
-    conn: sqlite3.Connection, ticker: str, lookback_hours: int
-) -> List[Tuple]:
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT title, source, published_at, content, url
-        FROM articles
-        WHERE ticker = ?
-          AND datetime(COALESCE(published_at, fetched_at)) >= datetime('now', ?)
-        ORDER BY datetime(COALESCE(published_at, fetched_at)) DESC
-        LIMIT ?
-    """,
-        (ticker, f"-{lookback_hours} hours", MAX_ARTICLES_PER_TICKER),
-    )
-    return cursor.fetchall()
-
-
-def get_digest_generated_at(
-    conn: sqlite3.Connection, ticker: str, lookback_hours: int
-) -> Optional[str]:
-    cursor = conn.cursor()
-    row = cursor.execute(
-        """
-        SELECT datetime(generated_at)
-        FROM company_digest
-        WHERE ticker = ?
-          AND window_hours = ?
-        LIMIT 1
-        """,
-        (ticker, lookback_hours),
+def get_latest_article_timestamp(conn: sqlite3.Connection, ticker: str, window_start: str, window_end: str) -> Optional[str]:
+    row = conn.execute(
+        """SELECT MAX(datetime(COALESCE(published_at, fetched_at))) FROM articles
+           WHERE ticker = ?
+             AND datetime(COALESCE(published_at, fetched_at)) >= datetime(?)
+             AND datetime(COALESCE(published_at, fetched_at)) < datetime(?)""",
+        (ticker, window_start, window_end),
     ).fetchone()
-    if not row:
-        return None
-    return row[0]
-
-
-def parse_db_timestamp(value: Optional[str]) -> Optional[datetime]:
-    if not value:
-        return None
-
-    normalized = value.strip()
-    if not normalized:
-        return None
-
-    # Handle common SQLite and ISO formats consistently.
-    normalized = normalized.replace("T", " ").replace("Z", "+00:00")
-
-    try:
-        dt = datetime.fromisoformat(normalized)
-    except ValueError:
-        try:
-            dt = datetime.strptime(normalized, "%Y-%m-%d %H:%M:%S")
-        except ValueError:
-            return None
-
-    # Normalize timezone-aware values for safe comparison.
-    if dt.tzinfo is not None:
-        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
-
-    return dt
-
-
-def get_latest_article_timestamp(
-    conn: sqlite3.Connection, ticker: str, lookback_hours: int
-) -> Optional[str]:
-    cursor = conn.cursor()
-    row = cursor.execute(
-        """
-        SELECT MAX(datetime(COALESCE(published_at, fetched_at)))
-        FROM articles
-        WHERE ticker = ?
-          AND datetime(COALESCE(published_at, fetched_at)) >= datetime('now', ?)
-        """,
-        (ticker, f"-{lookback_hours} hours"),
-    ).fetchone()
-    if not row:
-        return None
-    return row[0]
-
-
-def should_regenerate_digest(
-    generated_at: Optional[str], latest_article_timestamp: Optional[str]
-) -> bool:
-    generated_dt = parse_db_timestamp(generated_at)
-    latest_article_dt = parse_db_timestamp(latest_article_timestamp)
-
-    if generated_dt is None:
-        return True
-    if latest_article_dt is None:
-        return False
-
-    return latest_article_dt > generated_dt
+    return row[0] if row else None
 
 
 def build_articles_text(ticker: str, articles: List[Tuple]) -> str:
     blocks = []
-
-    for i, article in enumerate(articles, start=1):
-        title = (article[0] or "").strip()
-        source = (article[1] or "").strip()
-        published_at = (article[2] or "").strip()
-        content = (article[3] or "").strip()
-        url = (article[4] or "").strip()
-
-        if content:
-            content = content[:MAX_CONTENT_CHARS]
-        else:
-            content = "[No content fetched]"
-
-        block = f"""Article {i}
-Ticker: {ticker}
-Title: {title}
-Source: {source}
-Published At: {published_at}
-URL: {url}
-Content:
-{content}"""
-        blocks.append(block)
-
-    return "\n\n" + ("\n\n" + ("-" * 80) + "\n\n").join(blocks)
+    for i, article in enumerate(articles, 1):
+        title, source, published_at, content, url = ((value or "").strip() for value in article)
+        content = content[:MAX_CONTENT_CHARS] if content else "[No content fetched]"
+        blocks.append(f"Article {i}\nTicker: {ticker}\nTitle: {title}\nSource: {source}\nPublished At: {published_at}\nURL: {url}\nContent:\n{content}")
+    return "\n\n" + ("\n\n" + "-" * 80 + "\n\n").join(blocks)
 
 
-def generate_ai_summary(
-    client: OpenAI, ticker: str, articles: List[Tuple], lookback_hours: int
-) -> str:
+def generate_ai_summary(client: OpenAI, ticker: str, articles: List[Tuple], report_date: date) -> str:
     if not articles:
-        return f"{ticker} has no news in the last {lookback_hours} hours."
-
-    article_text = build_articles_text(ticker, articles)
-
+        return f"{ticker} has no news for {report_date.isoformat()}."
     prompt = f"""
 你是一位專業的財經新聞整合助手，正在為投資研究儀表板撰寫公司新聞摘要。
-
-你會收到同一家公司（Ticker: {ticker}）在過去 {lookback_hours} 小時內的多篇新聞，請整合成一段繁體中文的公司層級摘要。
-
-請遵守以下原則：
-
+你會收到同一家公司（Ticker: {ticker}）在 {report_date.isoformat()} 日報固定 24 小時區間內的多篇新聞，請整合成一段繁體中文的公司層級摘要。
 - 最前面先輸出：正面、負面或中性。
 - 直接輸出單一緊湊段落，不要分段、不要條列。
-- 對多個新聞來源進行整合，相同事件請合併描述，整體約150–250字，不要自行推論新聞未提及的內容。
-- 若新聞僅包含股價、估值（如 PE）、技術面、排行榜、連結失敗或其他缺乏公司層級資訊的內容，僅輸出「來源內容無重大消息」，不須補足篇幅。
-- Reuters、Bloomberg、公司公告、SEC 及 Tier-1 sell-side 的重大內容，可適度增加篇幅至350–400字。
-- 保留重要數字、產品、客戶、時程及管理層談話。
-- 語氣保持客觀，使用繁體中文，風格如 sell-side analyst 的公司近況摘要。
-
+- 整合相同事件，約150–250字，不要自行推論未提及內容。
+- 若僅包含股價、估值、技術面、排行榜或缺乏公司層級資訊，僅輸出「來源內容無重大消息」。
+- Reuters、Bloomberg、公司公告、SEC 及 Tier-1 sell-side 的重大內容，可至350–400字。
+- 保留重要數字、產品、客戶、時程及管理層談話，語氣客觀。
 以下是新聞資料：
-
-{article_text}
+{build_articles_text(ticker, articles)}
 """
-
     response = client.responses.create(model=MODEL, input=prompt)
-
-    summary = (response.output_text or "").strip()
-
-    if not summary:
-        return f"{ticker}: Summary generation returned empty output."
-
-    return summary
+    return (response.output_text or "").strip() or f"{ticker}: Summary generation returned empty output."
 
 
-def save_company_digest(
-    conn: sqlite3.Connection,
-    ticker: str,
-    lookback_hours: int,
-    summary: str,
-    article_count: int,
-) -> None:
-    cursor = conn.cursor()
-
-    window_end = datetime.utcnow()
-    window_start = window_end - timedelta(hours=lookback_hours)
-
-    cursor.execute(
-        """
-        INSERT OR REPLACE INTO company_digest (
-            ticker,
-            window_hours,
-            window_start,
-            window_end,
-            article_count,
-            summary,
-            generated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-    """,
-        (
-            ticker,
-            lookback_hours,
-            window_start.strftime("%Y-%m-%d %H:%M:%S"),
-            window_end.strftime("%Y-%m-%d %H:%M:%S"),
-            article_count,
-            summary,
-        ),
+def save_company_digest(conn: sqlite3.Connection, report_date: date, ticker: str, window_start: str, window_end: str, summary: str, article_count: int) -> None:
+    conn.execute(
+        """INSERT INTO company_digest
+           (report_date, ticker, window_start, window_end, article_count, summary, generated_at)
+           VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+           ON CONFLICT(report_date, ticker) DO UPDATE SET
+             window_start=excluded.window_start, window_end=excluded.window_end,
+             article_count=excluded.article_count, summary=excluded.summary,
+             generated_at=CURRENT_TIMESTAMP""",
+        (report_date.isoformat(), ticker, window_start, window_end, article_count, summary),
     )
-
     conn.commit()
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Generate company digests")
-    parser.add_argument(
-        "--window-hours",
-        type=int,
-        default=DEFAULT_LOOKBACK_HOURS,
-        help="Lookback window in hours (supported: 24, 48).",
-    )
+    parser = argparse.ArgumentParser(description="Generate a fixed daily company snapshot")
+    parser.add_argument("--report-date", type=date.fromisoformat, default=None, help="Taipei report date (YYYY-MM-DD)")
     return parser.parse_args()
 
 
 def main() -> None:
-    args = parse_args()
-    lookback_hours = args.window_hours
-    if lookback_hours not in SUPPORTED_WINDOWS:
-        raise ValueError(
-            f"Unsupported --window-hours={lookback_hours}. Supported values: {sorted(SUPPORTED_WINDOWS)}"
-        )
-
-    print(f"Loading .env from: {ENV_PATH}")
-    print(f"Using database: {DB_PATH}")
-    print(f"Digest window: {lookback_hours}h")
-
+    report_date = parse_args().report_date or default_report_date()
+    start_dt, end_dt = daily_window(report_date)
+    window_start, window_end = utc_sql_timestamp(start_dt), utc_sql_timestamp(end_dt)
+    print(f"Report date: {report_date}; fixed window: {window_start} UTC -> {window_end} UTC")
     conn = get_db_connection()
-
     try:
         ensure_company_digest_schema(conn)
-        client = get_openai_client()
-
-        recent_tickers = get_recent_tickers(conn, lookback_hours)
-        recent_set = set(recent_tickers)
-
-        digest_tickers = get_all_digest_tickers(conn, lookback_hours)
-        stale_digest_tickers = sorted(set(digest_tickers) - recent_set)
-
-        for ticker in stale_digest_tickers:
-            delete_digest_for_ticker(conn, ticker, lookback_hours)
-            print(
-                f"ticker={ticker} | window={lookback_hours}h | article_count=0 | action=delete stale digest"
-            )
-
-        if not recent_tickers:
-            print(f"No recent tickers found in the last {lookback_hours} hours.")
+        tickers = get_recent_tickers(conn, window_start, window_end)
+        if not tickers:
+            print("No articles found in the snapshot window.")
             return
-
-        for ticker in recent_tickers:
-            articles = get_articles_for_ticker(conn, ticker, lookback_hours)
-            article_count = len(articles)
-
-            if article_count == 0:
-                # Defensive branch; recent_tickers already filters this out.
-                delete_digest_for_ticker(conn, ticker, lookback_hours)
-                print(
-                    f"ticker={ticker} | window={lookback_hours}h | article_count=0 | action=delete stale digest"
-                )
-                continue
-
-            generated_at = get_digest_generated_at(conn, ticker, lookback_hours)
-            latest_article_timestamp = get_latest_article_timestamp(conn, ticker, lookback_hours)
-
-            if should_regenerate_digest(generated_at, latest_article_timestamp):
-                try:
-                    print(
-                        f"ticker={ticker} | window={lookback_hours}h | article_count={article_count} | action=generate"
-                    )
-                    summary = generate_ai_summary(client, ticker, articles, lookback_hours)
-                    save_company_digest(
-                        conn=conn,
-                        ticker=ticker,
-                        lookback_hours=lookback_hours,
-                        summary=summary,
-                        article_count=article_count,
-                    )
-                except Exception as e:
-                    print(f"  Failed to summarize {ticker}: {e}")
-            else:
-                print(
-                    f"ticker={ticker} | window={lookback_hours}h | article_count={article_count} | action=skip"
-                )
-
+        client = get_openai_client()
+        for ticker in tickers:
+            articles = get_articles_for_ticker(conn, ticker, window_start, window_end)
+            try:
+                print(f"ticker={ticker} | report_date={report_date} | article_count={len(articles)} | action=generate")
+                summary = generate_ai_summary(client, ticker, articles, report_date)
+                save_company_digest(conn, report_date, ticker, window_start, window_end, summary, len(articles))
+            except Exception as exc:
+                print(f"  Failed to summarize {ticker}: {exc}")
         print("Done.")
-
     finally:
         conn.close()
 

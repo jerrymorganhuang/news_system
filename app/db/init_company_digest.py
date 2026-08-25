@@ -1,23 +1,15 @@
 import sqlite3
+import sys
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parents[2]
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+
+from app.db.company_digest_schema import ensure_company_digest_schema
+
 
 conn = sqlite3.connect("data/news.db")
-cursor = conn.cursor()
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS company_digest (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    ticker TEXT NOT NULL,
-    window_hours INTEGER NOT NULL,
-    window_start TEXT NOT NULL,
-    window_end TEXT NOT NULL,
-    article_count INTEGER,
-    summary TEXT,
-    generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(ticker, window_hours)
-)
-""")
-
-conn.commit()
+ensure_company_digest_schema(conn)
 conn.close()
-
-print("company_digest table created.")
+print("company_digest daily snapshot table is ready.")

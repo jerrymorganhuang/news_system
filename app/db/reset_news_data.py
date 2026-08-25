@@ -39,6 +39,7 @@ def main():
 
     print("Done.")
     print(f"Cleared tables: {', '.join(CLEARED_TABLES)}")
+    print("All historical daily company snapshots were permanently deleted.")
     print(f"Preserved tables: {', '.join(PRESERVED_TABLES)}")
     print("Confirmed untouched tables: watchlist, ticker_source_map")
 
