@@ -1049,9 +1049,26 @@ def build_dashboard_rows(conn, report_date):
     return results
 
 
+def is_low_signal_summary(summary):
+    summary_text = (summary or "").strip()
+    return "來源內容無重大消息" in summary_text[:20]
+
+
 def should_hide_dashboard_row(row):
-    summary = row["summary"] or ""
-    return row["article_count"] == 0 or summary.strip().startswith("來源內容無重大消息")
+    return row["article_count"] == 0 or is_low_signal_summary(row["summary"])
+
+
+def dashboard_metrics(all_dashboard_rows, displayed_rows):
+    return {
+        "watchlist": len(all_dashboard_rows),
+        "with_news": sum(row["article_count"] > 0 for row in all_dashboard_rows),
+        "low_signal": sum(
+            row["article_count"] > 0 and is_low_signal_summary(row["summary"])
+            for row in all_dashboard_rows
+        ),
+        "displayed": len(displayed_rows),
+        "articles": sum(row["article_count"] for row in all_dashboard_rows),
+    }
 
 
 # ========= Script Runner =========
@@ -1382,10 +1399,12 @@ try:
         st.caption(f"As-of Date: {selected_report_date}")
 
         # ----- Main -----
-        dashboard_rows = build_dashboard_rows(conn, selected_report_date)
+        all_dashboard_rows = build_dashboard_rows(conn, selected_report_date)
 
         if hide_empty:
-            dashboard_rows = [row for row in dashboard_rows if not should_hide_dashboard_row(row)]
+            dashboard_rows = [row for row in all_dashboard_rows if not should_hide_dashboard_row(row)]
+        else:
+            dashboard_rows = all_dashboard_rows
 
         if sort_option == "Sort by Ticker A-Z":
             dashboard_rows = sorted(dashboard_rows, key=lambda x: x["ticker"])
@@ -1395,12 +1414,15 @@ try:
                 key=lambda x: (-x["article_count"], x["ticker"])
             )
 
-        overview_col1, overview_col2, overview_col3 = st.columns(3)
-        overview_col1.metric("Displayed tickers", len(dashboard_rows))
-        overview_col2.metric("Tickers with data", sum(1 for row in dashboard_rows if row["has_data"]))
-        overview_col3.metric(
+        metrics = dashboard_metrics(all_dashboard_rows, dashboard_rows)
+        overview_col1, overview_col2, overview_col3, overview_col4, overview_col5 = st.columns(5)
+        overview_col1.metric("Watchlist", metrics["watchlist"])
+        overview_col2.metric("With News", metrics["with_news"])
+        overview_col3.metric("Low Signal", metrics["low_signal"])
+        overview_col4.metric("Displayed", metrics["displayed"])
+        overview_col5.metric(
             f"Articles · {selected_report_date}",
-            sum(row["article_count"] for row in dashboard_rows),
+            metrics["articles"],
         )
 
         if not dashboard_rows:
