@@ -2,7 +2,6 @@ import os
 import sys
 import math
 import json
-import re
 import sqlite3
 import subprocess
 from datetime import datetime, timezone, timedelta
@@ -17,6 +16,7 @@ from app.db.company_digest_schema import (
     default_report_date,
     ensure_company_digest_schema as migrate_company_digest_schema,
 )
+from app.db.sec_dashboard import get_sec_summary_and_rows
 
 
 # ========= Paths =========
@@ -918,31 +918,6 @@ def ensure_sec_phase2_schema(conn):
         "CREATE INDEX IF NOT EXISTS idx_sec_digest_ticker_window ON sec_digest(ticker, window_hours)"
     )
     conn.commit()
-
-
-def get_sec_summary_and_rows(conn, ticker, window_start, window_end):
-    accepted_expr = (
-        "CASE WHEN length(sf.accepted_datetime)=14 THEN "
-        "substr(sf.accepted_datetime,1,4)||'-'||substr(sf.accepted_datetime,5,2)||'-'||substr(sf.accepted_datetime,7,2)||' '||"
-        "substr(sf.accepted_datetime,9,2)||':'||substr(sf.accepted_datetime,11,2)||':'||substr(sf.accepted_datetime,13,2) "
-        "ELSE sf.accepted_datetime END"
-    )
-    digest = conn.execute(
-        """SELECT summary_zh, generated_at FROM sec_digest
-           WHERE ticker = ? AND window_hours = 24
-             AND datetime(window_end) = datetime(?)
-           ORDER BY generated_at DESC LIMIT 1""", (ticker, window_end)
-    ).fetchone()
-    document_time_expr = f"COALESCE({accepted_expr}, sf.filing_date, sd.fetched_at)"
-    rows = conn.execute(f"""SELECT {document_time_expr}, sd.document_type,
-        COALESCE(NULLIF(sd.document_title, ''), sd.document_url), sd.document_url
-        FROM sec_documents sd LEFT JOIN sec_filings sf ON sf.id=sd.filing_id
-        WHERE sd.ticker=? AND datetime({document_time_expr}) >= datetime(?)
-          AND datetime({document_time_expr}) < datetime(?)
-        ORDER BY datetime({document_time_expr}) DESC, sd.id DESC""",
-        (ticker, window_start, window_end)).fetchall()
-    summary = re.sub(r"\n?\[fp:[0-9a-f]{64}\]\s*$", "", (digest[0] or "").strip()) if digest else ""
-    return {"summary": summary, "generated_at": digest[1] if digest else "", "document_rows": rows}
 
 
 def get_company_digest(conn, ticker, report_date):
