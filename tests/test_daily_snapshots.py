@@ -76,21 +76,57 @@ def test_dashboard_uses_calendar_date_and_newspaper_icon():
     assert 'st.sidebar.selectbox(\n        "As-of Date"' not in source
 
 
-def test_hide_empty_filter_includes_article_count_and_summary_prefix():
+def dashboard_functions(*names):
     source = Path("app/ui/streamlit_app.py").read_text()
     tree = ast.parse(source)
-    function = next(
-        node
-        for node in tree.body
-        if isinstance(node, ast.FunctionDef) and node.name == "should_hide_dashboard_row"
-    )
+    functions = [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in names
+    ]
     namespace = {}
-    exec(compile(ast.Module(body=[function], type_ignores=[]), "<dashboard-filter>", "exec"), namespace)
+    exec(compile(ast.Module(body=functions, type_ignores=[]), "<dashboard-functions>", "exec"), namespace)
+    return source, namespace
+
+
+def test_hide_empty_filter_includes_article_count_and_low_signal_summary():
+    source, namespace = dashboard_functions("is_low_signal_summary", "should_hide_dashboard_row")
+    is_low_signal = namespace["is_low_signal_summary"]
     should_hide = namespace["should_hide_dashboard_row"]
 
+    assert is_low_signal("中性：來源內容無重大消息")
+    assert is_low_signal("正面：來源內容無重大消息")
+    assert is_low_signal("來源內容無重大消息")
+    assert not is_low_signal("12345678901234567890來源內容無重大消息")
     assert should_hide({"article_count": 0, "summary": "A normal summary"})
-    assert should_hide({"article_count": 5, "summary": "來源內容無重大消息"})
-    assert should_hide({"article_count": 5, "summary": "  來源內容無重大消息。近期新聞主要..."})
+    low_signal_row = {"article_count": 5, "summary": "中性： 來源內容無重大消息。近期新聞主要..."}
+    assert should_hide(low_signal_row)
     assert not should_hide({"article_count": 5, "summary": "A normal summary"})
+    assert [row for row in [low_signal_row] if not should_hide(row)] == []
+    assert [row for row in [low_signal_row]] == [low_signal_row]
     assert '"Hide tickers with no data",\n        value=True' in source
     assert "if hide_empty:" in source
+
+
+def test_dashboard_metrics_use_full_rows_and_render_in_funnel_order():
+    source, namespace = dashboard_functions("is_low_signal_summary", "dashboard_metrics")
+    rows = [
+        {"article_count": 0, "summary": ""},
+        {"article_count": 3, "summary": "中性：來源內容無重大消息"},
+        {"article_count": 2, "summary": "Material news"},
+    ]
+    metrics = namespace["dashboard_metrics"](rows, [rows[2]])
+    assert metrics == {
+        "watchlist": 3,
+        "with_news": 2,
+        "low_signal": 1,
+        "displayed": 1,
+        "articles": 5,
+    }
+    metric_calls = [
+        'overview_col1.metric("Watchlist"',
+        'overview_col2.metric("With News"',
+        'overview_col3.metric("Low Signal"',
+        'overview_col4.metric("Displayed"',
+        'overview_col5.metric(',
+    ]
+    assert [source.index(call) for call in metric_calls] == sorted(source.index(call) for call in metric_calls)
